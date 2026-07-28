@@ -4,6 +4,7 @@ These examples provide concrete examples to leverage miles in your own RL workfl
 
 ## Directory Structure
 
+- **[agentic_swe](./agentic_swe)**: RL on an unmodified coding CLI (qwen-code) over SWE tasks: a local OpenAI proxy keeps a token-exact ledger per conversation, sandboxes run the agent, a fresh sandbox grades the diff.
 - **[DrGRPO](./DrGRPO)**: Custom reducer for Dr.GRPO algorithm.
 - **[eval](./eval)**: Documentation and setup for evaluation environments using NeMo-Skills.
 - **[eval_multi_task](./eval_multi_task)**: Example for supporting OOD evaluation tasks, e.g., GPQA, IFBench.
