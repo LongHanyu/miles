@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from typing import Any
 
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER_PY
-from swebench.harness.utils import get_modified_files, get_new_files
+
+# swebench 4.1 ships get_modified_files but not get_new_files, so the test patch
+# is split here. unidiff comes with swebench, which parses patches with it too.
+from unidiff import PatchSet
 
 import sandbox
 from miles.utils.types import Sample
@@ -118,7 +121,9 @@ class SweTask:
         if self.test_patch.strip():
             # The agent may have edited the tests it is graded on; reset only
             # the files the official patch owns, not the candidate patch.
-            modified, new = get_modified_files(self.test_patch), get_new_files(self.test_patch)
+            files = list(PatchSet(self.test_patch))
+            modified = [file.source_file[2:] for file in files if file.source_file.startswith("a/")]
+            new = [file.target_file[2:] for file in files if file.source_file == "/dev/null"]
             if modified:
                 lines.append(shlex.join(["git", "checkout", self.base_commit, "--", *modified]))
             if new:
@@ -131,6 +136,9 @@ class SweTask:
 
         Dense because a binary flag leaves hard instances with no gradient.
         """
+        # Python map only: no parser in it reads test_spec, so None is safe. The
+        # combined map has one (immutable-js) that does, and a repo outside
+        # SWE-bench Verified should fail loudly here rather than mis-parse.
         parsed = MAP_REPO_TO_PARSER_PY[self.repo](test_output or "", None)  # type: ignore[arg-type]
         parsed = {name.strip(): status for name, status in parsed.items()}
         passed = {name for name, status in parsed.items() if status in {"PASSED", "XFAIL"}}
