@@ -1,20 +1,11 @@
-"""Local OpenAI-compatible endpoint: what the agent CLI inside the sandbox talks to.
+"""The OpenAI endpoint the agent CLI talks to, one proxy per rollout.
 
-One proxy per rollout sample, so one proxy == one set of ledgers == one training
-candidate. Each turn runs the same short pipeline::
+Each turn: render prompt tokens -> SGLang /generate -> parse into an assistant
+message -> record -> reply. The CLI's turn limit and the sandbox TTL bound the
+episode, so the proxy never cuts a turn short.
 
-    render prompt tokens -> route to a ledger -> SGLang /generate
-        -> parse the completion into an assistant message -> record -> reply
-
-There are no turn guards. The CLI's own ``--max-session-turns``, the agent
-timeout and the sandbox TTL already bound a rollout, and a turn the proxy cut
-short would only add tokens the model never chose.
-
-The tool schemas the harness sends are forwarded to *both* the renderer and the
-tool-call parser. That is not a detail: the parser types arguments from the
-schema, and without it every argument degrades to a string, which the chat
-template then renders differently from what the model emitted -- see
-``trajectory.render_prompt_ids``.
+Tool schemas go to both the renderer and the parser: untyped arguments render
+differently from what the model emitted and break the ledger prefix.
 """
 
 from __future__ import annotations
@@ -54,11 +45,9 @@ def parse_completion(
     tool_parser: str | None,
     reasoning_parser: str | None,
 ) -> dict[str, Any]:
-    """Raw model text -> OpenAI assistant message (thinking split out, tool calls typed).
+    """Raw model text -> OpenAI assistant message.
 
-    ``reasoning_content`` is returned as its own field because the CLI echoes it
-    back on the next request and the chat template renders it again -- that
-    round trip is what keeps the ledger prefix-clean for a thinking model.
+    ``reasoning_content`` stays separate because the CLI echoes it back verbatim.
     """
     reasoning, body = "", text
     if reasoning_parser:
@@ -158,10 +147,7 @@ class ModelProxy:
         sampling_params = {**self.sampling_params, "skip_special_tokens": True}
         payload = {"input_ids": prompt_ids, "sampling_params": sampling_params, "return_logprob": True}
         output = await post(self.model_url, payload)
-        # Contract of SGLang /generate with return_logprob: output_token_logprobs
-        # is always present, each entry (logprob, token_id, ...). A malformed
-        # response must raise -- dropping one token would misalign the whole
-        # training sequence against what the model actually emitted.
+        # Malformed responses must raise: a dropped token misaligns the sequence.
         meta = output["meta_info"]
         log_probs, token_ids = [], []
         for logprob, token_id, *_ in meta["output_token_logprobs"]:

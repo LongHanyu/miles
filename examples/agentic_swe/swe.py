@@ -116,10 +116,8 @@ class SweTask:
         if patch.strip():
             lines.append(_apply_patch(CANDIDATE_PATCH_PATH))
         if self.test_patch.strip():
-            # The official test patch always wins: an agent may have edited the
-            # very tests it is graded on. Reset exactly the files it owns, the
-            # way the official harness does -- resetting everything would undo
-            # the candidate patch as well.
+            # The agent may have edited the tests it is graded on; reset only
+            # the files the official patch owns, not the candidate patch.
             modified, new = get_modified_files(self.test_patch), get_new_files(self.test_patch)
             if modified:
                 lines.append(shlex.join(["git", "checkout", self.base_commit, "--", *modified]))
@@ -131,8 +129,7 @@ class SweTask:
     def score(self, test_output: str) -> float:
         """Reward = (fraction of FAIL_TO_PASS fixed) x (fraction of PASS_TO_PASS kept).
 
-        Dense on purpose: a binary "resolved" flag leaves a group of rollouts with
-        almost no gradient on hard instances.
+        Dense because a binary flag leaves hard instances with no gradient.
         """
         parsed = MAP_REPO_TO_PARSER_PY[self.repo](test_output or "", None)  # type: ignore[arg-type]
         parsed = {name.strip(): status for name, status in parsed.items()}

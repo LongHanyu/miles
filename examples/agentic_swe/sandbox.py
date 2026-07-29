@@ -1,8 +1,6 @@
 """Inspire sandboxes: boot one, run commands in it, reach it from the trainer.
 
-Platform code only. Nothing here knows what the agent is doing or how it is
-graded, so running the same rollout somewhere else is a matter of replacing this
-module.
+Platform code only -- replace this module to run the same rollout elsewhere.
 """
 
 from __future__ import annotations
@@ -14,8 +12,7 @@ import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-# The SDK sits on PYTHONPATH rather than in site-packages -- it is installed at a
-# cluster path; run_qwen35_35b_a3b.sh puts it there.
+# The SDK is installed at a cluster path; the run script puts it on PYTHONPATH.
 from inspire_sandbox import AsyncSandbox, CommandExitException
 
 SANDBOX_TTL = 3 * 60 * 60  # platform lifetime of each sandbox
@@ -53,11 +50,9 @@ async def run(
     user: str | None = None,
     cwd: str | None = None,
 ) -> ExecResult:
-    """Run a shell script in the sandbox and always return a result.
+    """Run a shell script and always return a result.
 
-    The SDK raises ``CommandExitException`` on a non-zero exit, but non-zero is
-    the normal case here (failing tests, an agent CLI exiting on its turn limit),
-    so it is turned back into data.
+    Non-zero is normal here, so the SDK's exception is turned back into data.
     """
     try:
         result = await sandbox.commands.run(
@@ -91,6 +86,7 @@ async def reverse_tunnel(
         user=user,
     )
     try:
+        # Inherit stdout/stderr: a dying tunnel has to say why.
         process = subprocess.Popen(
             [
                 "wstunnel",
@@ -104,8 +100,6 @@ async def reverse_tunnel(
                 f"tcp://127.0.0.1:{sandbox_port}:127.0.0.1:{proxy_port}",
                 f"wss://{sandbox.get_host(server_port)}",
             ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
         )
         try:
             await asyncio.sleep(3)
