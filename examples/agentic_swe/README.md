@@ -61,12 +61,15 @@ The host `wstunnel` binary must be available on `PATH`.
 
 ## Run
 
-From this directory:
+From the AvaTrain workspace root, which owns the `swe` extra that adds
+`swebench`. The sandbox SDK is a plain dependency, so nothing goes on
+`PYTHONPATH`.
 
 ```bash
 export HF_CHECKPOINT=/path/to/Qwen3.5-35B-A3B-sft
 export REF_LOAD=/path/to/Qwen3.5-35B-A3B-sft_torch_dist
-uv run --extra swe bash run_qwen35_35b_a3b.sh /path/to/swe_verified_train.jsonl
+uv run --extra swe bash miles/examples/agentic_swe/run_qwen35_35b_a3b.sh \
+    /path/to/swe_verified_train.jsonl
 ```
 
 The constants near the top of `generate.py` select the qwen-code and wstunnel

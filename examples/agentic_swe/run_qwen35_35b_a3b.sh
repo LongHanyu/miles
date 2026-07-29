@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 MILES_DIR="$(cd -- "${SCRIPT_DIR}/../.." &>/dev/null && pwd)"
 source "${MILES_DIR}/scripts/models/qwen3.5-35B-A3B.sh"
 
-TASK_FILE="${1:?usage: $0 TASK_FILE.jsonl}"
+TASK_FILE="$(realpath "${1:?usage: $0 TASK_FILE.jsonl}")"
 ROLLOUT_PYTHONPATH="/root/Megatron-LM/:${SCRIPT_DIR}"
 NUM_GPUS="${NUM_GPUS:-8}"
 
@@ -91,6 +91,9 @@ MISC_ARGS=(
    --attention-softmax-in-fp32
    --attention-backend flash
 )
+
+# ray job submit uploads the working directory and runs train.py from it.
+cd "${MILES_DIR}"
 
 export MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
 ray start --head --node-ip-address ${MASTER_ADDR} --num-gpus ${NUM_GPUS} \
