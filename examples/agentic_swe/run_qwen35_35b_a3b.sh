@@ -4,7 +4,7 @@
 # Prerequisites (see README.md):
 #   SBX_API_KEY / SBX_API_URL            sandbox platform credentials
 
-set -ex
+set -e
 export PYTHONUNBUFFERED=1
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -116,12 +116,12 @@ ray job submit --address="http://127.0.0.1:8265" \
    --actor-num-gpus-per-node ${NUM_GPUS} \
    --rollout-num-gpus ${NUM_GPUS} \
    --colocate \
-   ${MODEL_ARGS[@]} \
-   ${CKPT_ARGS[@]} \
-   ${ROLLOUT_ARGS[@]} \
-   ${OPTIMIZER_ARGS[@]} \
-   ${GRPO_ARGS[@]} \
-   ${DISTRIBUTED_ARGS[@]} \
-   ${PERF_ARGS[@]} \
-   ${SGLANG_ARGS[@]} \
-   ${MISC_ARGS[@]}
+   "${MODEL_ARGS[@]}" \
+   "${CKPT_ARGS[@]}" \
+   "${ROLLOUT_ARGS[@]}" \
+   "${OPTIMIZER_ARGS[@]}" \
+   "${GRPO_ARGS[@]}" \
+   "${DISTRIBUTED_ARGS[@]}" \
+   "${PERF_ARGS[@]}" \
+   "${SGLANG_ARGS[@]}" \
+   "${MISC_ARGS[@]}"

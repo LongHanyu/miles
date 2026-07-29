@@ -68,9 +68,15 @@ From the AvaTrain workspace root, which owns the `swe` extra that adds
 ```bash
 export HF_CHECKPOINT=/path/to/Qwen3.5-35B-A3B-sft
 export REF_LOAD=/path/to/Qwen3.5-35B-A3B-sft_torch_dist
-uv run --extra swe bash miles/examples/agentic_swe/run_qwen35_35b_a3b.sh \
+export SBX_API_KEY=...
+export SBX_API_URL=https://qz-sbx-api.sii.edu.cn
+bash scripts/train/agentic_swe.sh \
     /path/to/swe_verified_train.jsonl
 ```
+
+Run this command from the AvaTrain workspace root. The wrapper checks that
+`wstunnel` is available on `PATH` and installs the locked `swe` extra through
+`uv`.
 
 The constants near the top of `generate.py` select the qwen-code and wstunnel
 paths and the rollout time limits. Miles' rollout response length is the token
