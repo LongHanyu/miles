@@ -923,6 +923,13 @@ def calculate_log_probs_and_entropy(
         )
 
     logits = logits.contiguous()
+
+    def logits_for_math(chunk: torch.Tensor) -> torch.Tensor:
+        # Float16Module used to upcast the complete [sequence, vocab] output.
+        # Preserve those FP32 calculations without retaining a full-sequence
+        # FP32 tensor, which is too large for long agent trajectories.
+        return chunk.clone() if chunk.dtype == torch.float32 else chunk.float()
+
     # TODO: not sure why we need to clone the logits here.
     # Without the clone, the backward will trigger inplace edit error.
     # It seems that the function with tp will modify the logits inplace.
@@ -934,27 +941,27 @@ def calculate_log_probs_and_entropy(
             logits_chunks = logits.chunk(num_chunks, dim=0)
             log_probs = []
             for tokens_chunk, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
-                log_prob = compute_log_probs(logits_chunk.clone(), tokens_chunk, tp_group)
+                log_prob = compute_log_probs(logits_for_math(logits_chunk), tokens_chunk, tp_group)
                 log_probs.append(log_prob)
             log_prob = torch.cat(log_probs, dim=0)
             if with_entropy:
                 entropys = []
                 for _, logits_chunk in zip(tokens_chunks, logits_chunks, strict=True):
                     if entropy_requires_grad:
-                        entropy = compute_entropy_from_logits(logits_chunk.clone(), tp_group)
+                        entropy = compute_entropy_from_logits(logits_for_math(logits_chunk), tp_group)
                     else:
                         with torch.no_grad():
-                            entropy = compute_entropy_from_logits(logits_chunk.detach(), tp_group)
+                            entropy = compute_entropy_from_logits(logits_for_math(logits_chunk.detach()), tp_group)
                     entropys.append(entropy)
                 entropy = torch.cat(entropys, dim=0)
         else:
-            log_prob = compute_log_probs(logits.clone(), tokens, tp_group)
+            log_prob = compute_log_probs(logits_for_math(logits), tokens, tp_group)
             if with_entropy:
                 if entropy_requires_grad:
-                    entropy = compute_entropy_from_logits(logits.clone(), tp_group)
+                    entropy = compute_entropy_from_logits(logits_for_math(logits), tp_group)
                 else:
                     with torch.no_grad():
-                        entropy = compute_entropy_from_logits(logits.detach(), tp_group)
+                        entropy = compute_entropy_from_logits(logits_for_math(logits.detach()), tp_group)
     else:
         log_prob = logits.new_zeros((0,))
         if with_entropy:

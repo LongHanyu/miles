@@ -270,6 +270,11 @@ def forward_only(
             labels=None,
             packed_seq_params=packed_seq_params,
             loss_mask=batch["full_loss_masks"],
+            # The full [sequence, vocab] tensor is prohibitively large for
+            # long agent trajectories. Keep BF16/FP16 logits in model
+            # precision and let the chunked log-prob kernel do stable
+            # reductions, matching Megatron's RL get_logprobs path.
+            fp32_output=not (args.fp16 or args.bf16),
             **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
         )
 
@@ -443,7 +448,10 @@ def train_one_step(
             if (x := batch["multimodal_train_inputs"]) is not None:
                 forward_kwargs.update(x)
 
-            output_tensor = model(**forward_kwargs)
+            output_tensor = model(
+                **forward_kwargs,
+                fp32_output=not (args.fp16 or args.bf16),
+            )
 
         for m, old_stage in zip(all_replay_managers, old_stages, strict=True):
             m.stage = old_stage

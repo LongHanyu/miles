@@ -27,7 +27,9 @@ def get_responses(
 
     Args:
         logits: Model outputs with shape `[1, T, V]` (policy) or `[1, T, 1]`
-            (value). Must be float32.
+            (value). Policy logits may remain in model precision so long
+            sequences can be converted to float32 one calculation chunk at a
+            time.
         args: Configuration containing `rollout_temperature` for scaling.
         unconcat_tokens: List of token tensors (prompt+response) per sample.
         total_lengths: Total sequence lengths (prompt+response) per sample.
@@ -41,7 +43,7 @@ def get_responses(
     qkv_format = args.qkv_format
 
     if not args.true_on_policy_mode:
-        assert logits.dtype == torch.float32, f"{logits.dtype}"
+        assert logits.dtype in {torch.float32, torch.bfloat16, torch.float16}, f"{logits.dtype}"
     assert len(logits.shape) == 3, f"{logits.shape}"
 
     if qkv_format == "thd":
