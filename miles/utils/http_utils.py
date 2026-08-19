@@ -13,6 +13,7 @@ import msgspec
 logger = logging.getLogger(__name__)
 
 MILES_HOST_IP_ENV = "MILES_HOST_IP"
+RETRYABLE_HTTP_STATUS_CODES = {408, 409, 425, 429}
 
 
 def find_available_port(base_port: int):
@@ -220,13 +221,21 @@ async def _post(
                 print(f"JSONDecodeError: {response.text}")
                 output = response.text
         except Exception as e:
-            retry_count += 1
-
             if isinstance(e, httpx.HTTPStatusError):
                 response_text = e.response.text
+                status_code = e.response.status_code
+                if status_code < 500 and status_code not in RETRYABLE_HTTP_STATUS_CODES:
+                    logger.info(
+                        "Non-retryable HTTP status %s, failing immediately (url=%s, response=%s)",
+                        status_code,
+                        url,
+                        response_text,
+                    )
+                    raise
             else:
                 response_text = None
 
+            retry_count += 1
             logger.info(
                 f"Error: {e}, Error type: {type(e)}, retrying... (attempt {retry_count}/{max_retries}, url={url}, headers={headers}, response={response_text})"
             )

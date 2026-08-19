@@ -25,11 +25,25 @@ import multiprocessing
 import socket
 import threading
 import time
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
-from miles.utils.http_utils import wait_for_server_ready
+from miles.utils.http_utils import _post, wait_for_server_ready
+
+
+@pytest.mark.asyncio
+async def test_post_does_not_retry_nonretryable_client_error():
+    request = httpx.Request("POST", "http://model/generate")
+    response = httpx.Response(400, request=request, json={"error": "input too long"})
+    client = AsyncMock()
+    client.post.return_value = response
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await _post(client, str(request.url), {"input_ids": []}, max_retries=60)
+
+    client.post.assert_awaited_once()
 
 
 def _find_free_port() -> int:
