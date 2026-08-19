@@ -196,6 +196,11 @@ def should_run_periodic_action(
     return (step % interval == 0) or (num_rollout_per_epoch is not None and step % num_rollout_per_epoch == 0)
 
 
+def needs_rollout_model(rollout_id: int, num_rollout: int, run_eval: bool) -> bool:
+    """Return whether trained weights are consumed after the current step."""
+    return rollout_id + 1 < num_rollout or run_eval
+
+
 async def as_completed_async(tasks):
     for coro in asyncio.as_completed(tasks):
         yield await coro
