@@ -1,7 +1,7 @@
 # Agentic SWE RL
 
 This example trains the unmodified `qwen-code` CLI on SWE-bench Verified. The
-agent runs in an Inspire sandbox and calls a local OpenAI-compatible proxy that
+agent runs in a YiCloud OpenSandbox instance and calls a local OpenAI-compatible proxy that
 serves the policy from Miles.
 
 One rollout has four steps:
@@ -48,35 +48,44 @@ base_commit
 inspire_template
 docker_image_default_user
 docker_image_env
+sandbox_bootstrap (optional; prepares generic images before setup and grading)
 test_patch
 FAIL_TO_PASS
 PASS_TO_PASS
 install_config.test_cmd
 ```
 
-The sandbox template must contain the prepared repository and may be safely
-reset with `git reset --hard` and `git clean -fd`.
+For compatibility with existing data conversion, the field is still named
+`inspire_template`, but its value must now be a YiCloud image reference such as
+`project/repository:tag`. The image must either contain the prepared repository
+or provide `sandbox_bootstrap` metadata that creates it. The resulting
+workspace must be safely resettable with `git reset --hard` and `git clean -fd`.
 
 The host `wstunnel` binary must be available on `PATH`.
 
 ## Run
 
 From the AvaTrain workspace root, which owns the `swe` extra that adds
-`swebench`. The sandbox SDK is a plain dependency, so nothing goes on
-`PYTHONPATH`.
+`swebench`. `AVACORE_SRC` must point to the AvaCore `src` directory containing
+the shared `ava_core_yicloud` package; the wrapper defaults to a sibling
+AvaCore checkout.
 
 ```bash
 export HF_CHECKPOINT=/path/to/Qwen3.5-35B-A3B-sft
 export REF_LOAD=/path/to/Qwen3.5-35B-A3B-sft_torch_dist
-export SBX_API_KEY=...
-export SBX_API_URL=https://qz-sbx-api.sii.edu.cn
+export YICLOUD_API_HOST=https://gate.yicloud.com.cn
+export YICLOUD_PUBLIC_KEY=...
+export YICLOUD_SECRET_KEY=...
+export YICLOUD_PROJECT_NAME=...
+export YICLOUD_SANDBOX_ENVIRONMENT_ID=...
 bash scripts/train/agentic_swe.sh \
     /path/to/swe_verified_train.jsonl
 ```
 
 Run this command from the AvaTrain workspace root. The wrapper checks that
-`wstunnel` is available on `PATH` and installs the locked `swe` extra through
-`uv`.
+`wstunnel` is available on `PATH` and uses the active Python environment. The
+environment must contain AvaCore's YiCloud dependencies before the offline GPU
+job starts.
 
 The constants near the top of `generate.py` select the qwen-code and wstunnel
 paths and the rollout time limits. Miles' rollout response length is the token
