@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from argparse import Namespace
 from collections.abc import Callable
 
@@ -17,6 +18,11 @@ from miles.utils.misc import as_completed_async, load_function
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+
+def _positive_env_limit(name: str) -> int | None:
+    value = int(os.environ.get(name, "0"))
+    return value if value > 0 else None
 
 
 async def abort(state: GenerateState, pendings: set, rollout_id: int) -> list[list[Sample]]:
@@ -91,7 +97,25 @@ async def generate_rollout_async(
     data = []
     all_data = []
     do_print = True
+    failed_groups = 0
+    dropped_groups = 0
+    max_failed_groups = _positive_env_limit("MILES_ROLLOUT_MAX_FAILED_GROUPS")
+    max_dropped_groups = _positive_env_limit("MILES_DYNAMIC_SAMPLING_MAX_DROPPED_GROUPS")
     pbar = tqdm(total=target_data_size * args.n_samples_per_prompt, desc="Rollout generation")
+
+    async def fail_rollout(message: str, cause: Exception | None = None) -> None:
+        pbar.close()
+        if pendings:
+            try:
+                await abort(state, pendings, rollout_id)
+            except Exception:
+                logger.exception("failed to abort pending rollout requests")
+        state.reset()
+        error = RuntimeError(message)
+        if cause is not None:
+            raise error from cause
+        raise error
+
     while len(data) < target_data_size:
         while len(data) + len(pendings) < target_data_size:
             # get samples from the buffer and submit the generation requests.
@@ -106,7 +130,14 @@ async def generate_rollout_async(
             try:
                 group: list[Sample] = task.result()
             except Exception as e:
+                failed_groups += 1
                 logger.error(f"[rollout] Task raised exception: {e!r}", exc_info=True)
+                if max_failed_groups is not None and failed_groups >= max_failed_groups:
+                    await fail_rollout(
+                        f"rollout failed {failed_groups} groups before filling the batch; "
+                        f"kept={len(data)}/{target_data_size}",
+                        e,
+                    )
                 continue
 
             if do_print:
@@ -120,12 +151,40 @@ async def generate_rollout_async(
             all_data.append(group)
             dynamic_filter_output = call_dynamic_filter(dynamic_filter, args, group)
             if not dynamic_filter_output.keep:
+                dropped_groups += 1
                 metric_gatherer.on_dynamic_filter_drop(reason=dynamic_filter_output.reason)
+                if dropped_groups <= 10 or dropped_groups % 10 == 0:
+                    rewards = [sample.get_reward_value(args) for sample in group]
+                    logger.info(
+                        "[rollout] Dynamic filter dropped group %d: reason=%s rewards=%s; "
+                        "kept=%d/%d failed=%d pending=%d",
+                        dropped_groups,
+                        dynamic_filter_output.reason,
+                        rewards,
+                        len(data),
+                        target_data_size,
+                        failed_groups,
+                        len(pendings),
+                    )
+                if max_dropped_groups is not None and dropped_groups >= max_dropped_groups:
+                    await fail_rollout(
+                        f"dynamic sampling dropped {dropped_groups} groups before filling the batch; "
+                        f"kept={len(data)}/{target_data_size}; last_reason={dynamic_filter_output.reason}"
+                    )
                 continue
 
             # add the samples to the data
             # NOTE: here we have not stored all the unused samples back to the data buffer.
             if len(data) < target_data_size:
+                logger.info(
+                    "[rollout] Dynamic filter kept group %d/%d: rewards=%s failed=%d dropped=%d pending=%d",
+                    len(data) + 1,
+                    target_data_size,
+                    [sample.get_reward_value(args) for sample in group],
+                    failed_groups,
+                    dropped_groups,
+                    len(pendings),
+                )
                 data.append(group)
                 pbar.update(args.n_samples_per_prompt)
 
