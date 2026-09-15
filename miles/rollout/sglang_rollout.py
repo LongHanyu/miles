@@ -265,13 +265,6 @@ async def generate_and_rm(
     evaluation: bool = False,
     timeout=None,
 ) -> Sample | list[Sample]:
-    from miles.rollout.avacore_rollout import config_source, generate_group
-
-    if config_source():
-        outputs = await generate_group(args, GenerateState(args), [sample], sampling_params, evaluation, timeout)
-        # Eval metrics must count an episode once, not once per policy call.
-        return outputs[0][-1] if evaluation else outputs[0]
-
     # mask previous off-policy generation for partial rollout
     if args.partial_rollout and args.mask_offpolicy_in_partial_rollout and sample.response_length > 0:
         sample.loss_mask = [0] * sample.response_length
@@ -342,11 +335,6 @@ async def generate_and_rm_group(
     if state.aborted:
         return group
 
-    from miles.rollout.avacore_rollout import config_source, generate_group
-
-    if config_source():
-        return await generate_group(args, state, group, sampling_params, evaluation, timeout)
-
     # Generate a unique session_id for each sample in the group (consistent hashing only)
     if args.sglang_router_policy == "consistent_hashing":
         for sample in group:
@@ -396,15 +384,6 @@ async def abort(args: Namespace, rollout_id: int) -> list[list[Sample]]:
     for url, result in zip(urls, abort_results, strict=False):
         if isinstance(result, Exception):
             logger.warning(f"Failed to abort worker at {url}: {result}")
-
-    from miles.rollout.avacore_rollout import config_source
-
-    if config_source():
-        for task in state.pendings:
-            task.cancel()
-        await asyncio.gather(*state.pendings, return_exceptions=True)
-        state.pendings.clear()
-        return []
 
     # make sure all the pending tasks are finished
     count = 0
@@ -524,12 +503,7 @@ async def generate_rollout_async(
 
     await recompute_samples_rollout_logprobs_via_prefill(
         args,
-        [
-            sample
-            for group in data
-            for episode in group
-            for sample in (episode if isinstance(episode, list) else [episode])
-        ],
+        [sample for group in data for sample in group],
         url=get_model_url(args, "default"),
         sampling_params=state.sampling_params,
     )
