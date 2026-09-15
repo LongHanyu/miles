@@ -188,8 +188,29 @@ class HuggingfaceAttention(MegatronModule, ABC):
         *,
         inference_params: BaseInferenceContext | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert packed_seq_params is not None
-        cu_seqlens = packed_seq_params.cu_seqlens_q
+        if packed_seq_params is None:
+            # Local Torch attention uses padded BSHD inputs when Transformer
+            # Engine is unavailable.  Qwen3.5 linear attention still needs
+            # sequence boundaries, so synthesize one contiguous sequence per
+            # batch row for the HuggingFace implementation only.
+            assert self.args.qkv_format == "bshd"
+            seq_len, batch_size = hidden_states.shape[:2]
+            cu_seqlens = torch.arange(
+                0,
+                (batch_size + 1) * seq_len,
+                seq_len,
+                dtype=torch.int,
+                device=hidden_states.device,
+            )
+            packed_seq_params = PackedSeqParams(
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+                max_seqlen_q=seq_len,
+                max_seqlen_kv=seq_len,
+                qkv_format="bshd",
+            )
+        else:
+            cu_seqlens = packed_seq_params.cu_seqlens_q
 
         if self.args.sequence_parallel:
             # tensor_parallel_output_grad=False: the linear attention after this

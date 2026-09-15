@@ -185,8 +185,24 @@ def _named_params_and_buffers_global(
     """
     ep_size = get_parallel_state().ep.size
     ep_rank = get_parallel_state().ep.rank
-    if args.num_experts:
-        expert_offset = ep_rank * args.num_experts // ep_size
+    # The torch fallback stores each MoE expert below ``local_experts`` and
+    # numbers it from zero on every EP rank.  Weight synchronization needs a
+    # globally unique name before exchanging metadata; otherwise every rank
+    # claims the same local name and the subsequent EP broadcast chooses a
+    # different source rank on each participant.
+    expert_offset = ep_rank * args.num_experts // ep_size if args.num_experts else 0
+
+    def _globalize_local_expert_name(name: str) -> str:
+        match = re.search(
+            r"(?P<prefix>(?:.*\.)?)mlp\.experts\.local_experts\.(?P<index>\d+)(?P<suffix>\..+)$",
+            name,
+        )
+        if match is None:
+            return name
+        return (
+            f"{match.group('prefix')}mlp.experts.local_experts."
+            f"{int(match.group('index')) + expert_offset}{match.group('suffix')}"
+        )
 
     sig = inspect.signature(get_transformer_layer_offset)
     need_vp_stage = "vp_stage" in sig.parameters
@@ -216,7 +232,15 @@ def _named_params_and_buffers_global(
                 expert_pattern = r"transformer_layer.mlp.experts\.(.+)\.weight(\d+)"
                 match = re.match(expert_pattern, rest)
                 if not match:
-                    yield name, param
+                    # Torch fallback MTP experts use local_experts.<idx>.
+                    global_rest = _globalize_local_expert_name(rest)
+                    if global_rest != rest:
+                        yield (
+                            f"module.module.mtp.layers.{layer_idx}.{global_rest}",
+                            param,
+                        )
+                    else:
+                        yield name, param
                     continue
 
                 rest, expert_idx = match.groups()
@@ -235,6 +259,7 @@ def _named_params_and_buffers_global(
                 expert_idx = int(expert_idx) + expert_offset
                 yield f"module.module.decoder.layers.{layer_idx}.mlp.experts.{rest}.weight{expert_idx}", param
             else:
+                rest = _globalize_local_expert_name(rest)
                 yield f"module.module.decoder.layers.{layer_idx}.{rest}", param
 
         # treat expert bias as normal parameters

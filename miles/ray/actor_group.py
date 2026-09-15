@@ -65,11 +65,23 @@ class RayTrainGroup:
             env_vars["DUMPER_SOURCE_PATCHER_CONFIG"] = source_patcher_config
 
         if self.args.offload_train and self.args.train_backend == "megatron":
+            import torch
             import torch_memory_saver
 
-            dynlib_path = os.path.join(
-                os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
-                "torch_memory_saver_hook_mode_preload.abi3.so",
+            # torch-memory-saver ships separate preload hooks for CUDA 12 and
+            # CUDA 13. Select the ABI-matched library; the generic filename is
+            # the CUDA 12 build and makes Ray workers fail before Python starts
+            # when the training environment uses torch+cu130.
+            package_dir = os.path.dirname(os.path.dirname(torch_memory_saver.__file__))
+            cuda_major = str(torch.version.cuda or "").split(".", 1)[0]
+            candidates = []
+            if cuda_major:
+                candidates.append(f"torch_memory_saver_hook_mode_preload_cu{cuda_major}.abi3.so")
+            candidates.append("torch_memory_saver_hook_mode_preload.abi3.so")
+            dynlib_path = next(
+                (os.path.join(package_dir, name) for name in candidates
+                 if os.path.exists(os.path.join(package_dir, name))),
+                os.path.join(package_dir, candidates[-1]),
             )
             assert os.path.exists(dynlib_path), f"LD_PRELOAD so file {dynlib_path} does not exist."
 

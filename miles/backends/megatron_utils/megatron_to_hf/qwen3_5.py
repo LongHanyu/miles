@@ -91,6 +91,20 @@ def convert_qwen3_5_to_hf(args, name, param):
             else:
                 raise ValueError(f"Unknown expert parameter name: {name}")
 
+        # Torch fallback stores ungrouped local experts as
+        # local_experts.<expert_idx>.linear_fc{1,2}.weight.
+        local_expert_pattern = r"mlp\.experts\.local_experts\.(\d+)\.(linear_fc1|linear_fc2)\.weight"
+        match = re.match(local_expert_pattern, rest)
+        if match:
+            expert_idx, projection = match.groups()
+            if projection == "linear_fc1":
+                gate_weight, up_weight = param.chunk(2, dim=0)
+                return [
+                    (f"{prefix}.mlp.experts.{expert_idx}.gate_proj.weight", gate_weight),
+                    (f"{prefix}.mlp.experts.{expert_idx}.up_proj.weight", up_weight),
+                ]
+            return [(f"{prefix}.mlp.experts.{expert_idx}.down_proj.weight", param)]
+
         # shared expert
         shared_expert_pattern = r"mlp.shared_experts\.(.+)"
         match = re.match(shared_expert_pattern, rest)
@@ -157,6 +171,10 @@ def convert_qwen3_5_to_hf(args, name, param):
             return [(f"{prefix}.post_attention_layernorm.weight", param)]
         elif rest == "pre_mlp_layernorm.weight":
             return [(f"{prefix}.post_attention_layernorm.weight", param)]
+        # The local Qwen3.5 spec can emit the attention input norm directly
+        # under the decoder layer (without the self_attention namespace).
+        elif rest == "input_layernorm.weight":
+            return [(f"{prefix}.input_layernorm.weight", param)]
         elif rest == "mlp.router.weight":
             return [(f"{prefix}.mlp.gate.weight", param)]
         elif rest == "mlp.router.expert_bias":

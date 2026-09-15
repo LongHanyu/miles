@@ -2,7 +2,7 @@ import logging
 import random
 import socket
 from argparse import Namespace
-from contextlib import nullcontext
+from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
 
 import ray
@@ -53,6 +53,41 @@ logger = logging.getLogger(__name__)
 
 
 class MegatronTrainRayActor(TrainRayActor):
+    @contextmanager
+    def _disable_tms_if_active(self):
+        """Temporarily leave TMS only when this rank has an active region.
+
+        The preload hook and Megatron/DeepEP initialization can leave the
+        per-process ``interesting_region`` flag in different states.  The
+        torch-memory-saver context manager asserts that it is active, while
+        weight synchronization itself is valid with the flag already off.
+        Keeping the check local to each rank avoids turning that harmless
+        state difference into a distributed job failure.
+        """
+        if not self.args.offload_train:
+            yield
+            return
+
+        torch_memory_saver._ensure_initialized()
+        # Try the transition directly instead of probing the C flag first.  A
+        # probe followed by ``disable()`` has a race window in which another
+        # lifecycle hook can change the flag.  ``ExitStack.enter_context``
+        # confines the assertion guard to context entry; errors from the
+        # actual weight transfer and context cleanup still propagate.
+        disable_stack = ExitStack()
+        try:
+            disable_stack.enter_context(torch_memory_saver.disable())
+        except AssertionError as exc:
+            # Weight transfer is valid when another hook already left TMS
+            # inactive.  Do not turn that benign state into a failed job.
+            if "tms is active" not in str(exc).lower():
+                raise
+            logger.info("TMS region already inactive; skipping disable context for weight update")
+            yield
+        else:
+            with disable_stack:
+                yield
+
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
         self,
@@ -117,6 +152,16 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enabled = getattr(self.args, f"use_{m.name}_replay")
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
+        if self.args.offload_train:
+            # TMS_INIT_ENABLE starts the preload hook with its implicit region
+            # active.  Megatron's DDP buffer setup opens explicit param/grad
+            # regions, so clear that bootstrap state before model allocation.
+            torch_memory_saver._ensure_initialized()
+            tms_impl = torch_memory_saver._impl
+            if tms_impl is not None and tms_impl._binary_wrapper.cdll.tms_get_interesting_region():
+                tms_impl._binary_wrapper.cdll.tms_set_interesting_region(False)
+                logger.info("Reset torch_memory_saver bootstrap region before model initialization")
+
         (self.model, self.optimizer, self.opt_param_scheduler, loaded_rollout_id) = initialize_model_and_optimizer(
             args, role
         )
@@ -131,6 +176,16 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
         verify_megatron_parallel_state(self.model)
+
+        if self.args.offload_train:
+            # Keep the post-initialization state expected by sleep()/pause()
+            # and update_weights()/disable().  The explicit false state above
+            # is only needed while Megatron creates its DDP buffers.
+            torch_memory_saver._ensure_initialized()
+            tms_impl = torch_memory_saver._impl
+            if tms_impl is not None and not tms_impl._binary_wrapper.cdll.tms_get_interesting_region():
+                tms_impl._binary_wrapper.cdll.tms_set_interesting_region(True)
+                logger.info("Enabled torch_memory_saver region after model initialization")
 
         if role == "critic":
             if self.args.offload_train:
@@ -544,7 +599,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 destroy_process_groups()
             return
 
-        with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+        with self._disable_tms_if_active():
             print_memory("before update_weights")
             self.weight_updater.update_weights()
             print_memory("after update_weights")
