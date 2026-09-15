@@ -217,10 +217,8 @@ def get_qwen3_5_spec(args, config, vp_stage):
         config.moe_layer_freq = [0] * config.num_layers
 
     # Define the decoder block spec
-    # Keep conversion/debug runs usable without the optional Transformer
-    # Engine extension; production launchers still select it explicitly.
     kwargs = {
-        "use_transformer_engine": args.transformer_impl == "transformer_engine",
+        "use_transformer_engine": True,
     }
     if vp_stage is not None:
         kwargs["vp_stage"] = vp_stage
