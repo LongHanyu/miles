@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import logging
+import os
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
@@ -260,7 +261,7 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
 
 async def generate_and_rm(
     args: Namespace,
-    sample: Sample | list[Sample],
+    sample: Sample,
     sampling_params: dict[str, Any],
     evaluation: bool = False,
     timeout=None,
@@ -293,38 +294,41 @@ async def generate_and_rm(
             custom_func_path = getattr(sample, "generate_function_path", None) or args.custom_generate_function_path
 
             generate_fn = load_generate_function(custom_func_path) if custom_func_path else None
-            if generate_fn is not None:
+            if os.environ.get("AVACORE_ROLLOUT_CONFIG"):
+                from miles.rollout import avacore_rollout
+
+                generated = await avacore_rollout.generate(args, sample, sampling_params)
+            elif generate_fn is not None:
                 output = await generate_fn(
                     GenerateFnInput(state=state, sample=sample, sampling_params=sampling_params, evaluation=evaluation)
                 )
-                sample = output.samples
+                generated = output.samples
             else:
-                sample = await generate(args, sample, sampling_params, timeout=timeout)
+                generated = await generate(args, sample, sampling_params, timeout=timeout)
 
     # for the rm that need the whole group, we will not do the rm here
     if args.group_rm:
-        return sample
+        return generated
 
     # multi samples
-    if isinstance(sample, list):
-        samples = sample
-        if any([sample.status == Sample.Status.ABORTED for sample in samples]):
-            return samples
+    if isinstance(generated, list):
+        if any([sample.status == Sample.Status.ABORTED for sample in generated]):
+            return generated
 
         # for multi agent system, the reward of some sample is calculated during generation.
-        samples_need_reward = [sample for sample in samples if sample.reward is None]
+        samples_need_reward = [sample for sample in generated if sample.reward is None]
         rewards = await batched_async_rm(args, samples_need_reward)
         for sample, reward in zip(samples_need_reward, rewards, strict=False):
             sample.reward = reward
-        return samples
+        return generated
     else:
-        if sample.status == Sample.Status.ABORTED:
-            return sample
+        if generated.status == Sample.Status.ABORTED:
+            return generated
         # for multi-turn environment, a reward could be assigned to the agent.
-        if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
+        if generated.reward is None:
+            generated.reward = await async_rm(args, generated)
 
-    return sample
+    return generated
 
 
 async def generate_and_rm_group(
@@ -524,7 +528,7 @@ async def generate_rollout_async(
 EVAL_PROMPT_DATASET = {}
 
 
-async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[dict[str, dict[str, list[Any]]], list[list[Sample]]]:
+async def eval_rollout(args: Namespace, rollout_id: int) -> tuple[RolloutFnEvalOutput, list[list[Sample]]]:
     assert not args.group_rm, "Group RM is not supported for eval rollout"
 
     coros = []

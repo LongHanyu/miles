@@ -1,5 +1,6 @@
 import asyncio
 import random
+from typing import Literal, overload
 
 import aiohttp
 
@@ -64,6 +65,16 @@ async def async_rm(args, sample: Sample, **kwargs):
         raise NotImplementedError(f"Rule-based RM for {rm_type} is not implemented.")
     else:
         raise NotImplementedError("Rule-based RM type is not specified.")
+
+
+@overload
+async def batched_async_rm(
+    args, samples: list[Sample], inplace_set_reward_field: Literal[False] = False, **kwargs
+) -> list[int | float]: ...
+
+
+@overload
+async def batched_async_rm(args, samples: list[Sample], inplace_set_reward_field: Literal[True], **kwargs) -> None: ...
 
 
 async def batched_async_rm(

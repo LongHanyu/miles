@@ -8,6 +8,7 @@ from miles.rollout.data_source import DataSource
 from miles.utils.types import Sample
 
 if TYPE_CHECKING:
+    from miles.rollout import sglang_rollout
     from miles.rollout.inference_rollout.inference_rollout_common import GenerateState
 
 
@@ -46,14 +47,14 @@ class RolloutFnEvalInput(RolloutFnBaseInput):
 @dataclass
 class RolloutFnTrainOutput:
     samples: list[list[Sample]]
-    metrics: dict[str, Any] = None
+    metrics: dict[str, Any] | None = None
 
 
 # TODO make it frozen
 @dataclass
 class RolloutFnEvalOutput:
     data: dict[str, dict[str, Any]]
-    metrics: dict[str, Any] = None
+    metrics: dict[str, Any] | None = None
 
 
 RolloutFnInput = RolloutFnTrainInput | RolloutFnEvalInput
@@ -62,7 +63,7 @@ RolloutFnOutput = RolloutFnTrainOutput | RolloutFnEvalOutput
 
 @dataclass(frozen=True)
 class GenerateFnInput:
-    state: GenerateState
+    state: GenerateState | sglang_rollout.GenerateState
     sample: Sample
     sampling_params: dict[str, Any]
     evaluation: bool
