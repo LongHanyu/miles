@@ -517,7 +517,7 @@ def post_process_rewards(args, samples):
         if args.rewards_normalization and args.advantage_estimator in {"grpo", "gspo", "cispo"}:
             scores = torch.tensor(sample.metadata["avacore"]["group_rewards"], dtype=torch.float32)
             baseline = scores.mean() if args.quantile_k is None else scores.quantile(args.quantile_k)
-            value -= baseline.item()
+            value = (scores.new_tensor(value) - baseline).item()
             if args.grpo_std_normalization:
                 value /= (scores.std().item() if len(scores) > 1 else 0.0) + 1e-6
         normalized.append(value)
