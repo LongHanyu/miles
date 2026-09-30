@@ -14,7 +14,6 @@ import inspect
 import json
 import math
 import os
-import sys
 import tomllib
 import uuid
 from contextlib import aclosing
@@ -42,19 +41,6 @@ def load_document() -> tuple[dict, str]:
     else:
         path = Path(source).expanduser().resolve()
         document, name = tomllib.loads(path.read_text()), str(path)
-    root = (
-        Path(os.environ.get("AVA_CORE_ROOT", Path(__file__).resolve().parents[3] / "AvaCore")).expanduser().resolve()
-    )
-    package = root / "src" / "ava_core"
-    if not (package / "config.py").is_file():
-        raise ImportError(f"AvaCore checkout {root} lacks config.py; update AVA_CORE_ROOT")
-    loaded = sys.modules.get("ava_core")
-    if loaded is not None and Path(loaded.__file__).resolve().parent != package:
-        raise ImportError(f"A different AvaCore is already imported: {loaded.__file__}; expected {package}")
-    if str(package.parent) not in sys.path:
-        sys.path.insert(0, str(package.parent))
-    # Normal imports, including AvaCore's native extension. Never synthesize
-    # package modules or replace its tools/parser/rewards with local versions.
     from ava_core.config import interpolated
 
     return interpolated(document), name
