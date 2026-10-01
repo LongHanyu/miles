@@ -6,8 +6,13 @@ from miles.utils.types import Sample
 __all__ = ["check_reward_nonzero_std", "check_no_aborted"]
 
 
+def _episode_reward(args, sample):
+    """An episode that yields several samples (--generate-multi-samples) carries one reward on each."""
+    return (sample[0] if isinstance(sample, list) else sample).get_reward_value(args)
+
+
 def check_reward_nonzero_std(args, samples: list[Sample], **kwargs):
-    rewards = [sample.get_reward_value(args) for sample in samples]
+    rewards = [_episode_reward(args, sample) for sample in samples]
     keep = torch.tensor(rewards, dtype=torch.float64).std() > 1e-8
     return DynamicFilterOutput(
         keep=keep,
@@ -30,9 +35,9 @@ def check_no_aborted(args, samples: list[Sample], **kwargs):
         return DynamicFilterOutput(keep=False, reason="group_has_aborted")
     return DynamicFilterOutput(keep=True)
 
-def check_passrate(args, samples: list[Sample], **kwargs):
+def check_passrate(args, samples: list[Sample], **kwargs):fix
     """Keep groups only when passrate falls between the configured thresholds."""
-    rewards = [sample.get_reward_value(args) for sample in samples]
+    rewards = [_episode_reward(args, sample) for sample in samples]
     passrate = sum(1 for r in rewards if r > 0) / len(rewards) if rewards else 0
     threshold_low = args.passrate_threshold_low
     threshold_high = args.passrate_threshold_high + 1e-5
