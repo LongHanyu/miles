@@ -244,12 +244,9 @@ class Dataset:
                 **(apply_chat_template_kwargs or {}),
             )
 
-            if processor:
+            if processor and isinstance(prompt, list):
                 from miles.utils.processing_utils import process_vision_info
 
-                assert isinstance(prompt, list), (
-                    f"prompt must be a list when processor is not None, got {type(prompt)} instead"
-                )
                 multimodal_inputs = process_vision_info(prompt, processor)
             else:
                 multimodal_inputs = None
