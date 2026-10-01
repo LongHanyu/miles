@@ -33,9 +33,12 @@ logger = logging.getLogger(__name__)
 @cache
 def functions(path: str, router: str, checkpoint: str) -> tuple[GenerateFunction[Row], RewardFunction[Row]]:
     os.environ["SGLANG_ROUTER_URL"], os.environ["HF_CHECKPOINT"] = router, checkpoint
-    document = interpolated(tomllib.loads(Path(path).read_text()))
+    document = tomllib.loads(Path(path).read_text())
     conv = launch_converter()
-    return conv.structure(document["generate"], GenerateFunction), conv.structure(document["reward"], RewardFunction)
+    return (
+        conv.structure(interpolated(document["generate"]), GenerateFunction),
+        conv.structure(interpolated(document["reward"]), RewardFunction),
+    )
 
 
 def flattened(trace: Trace) -> list[Trace]:
