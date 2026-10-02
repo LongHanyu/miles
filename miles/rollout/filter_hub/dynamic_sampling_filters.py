@@ -35,7 +35,8 @@ def check_no_aborted(args, samples: list[Sample], **kwargs):
         return DynamicFilterOutput(keep=False, reason="group_has_aborted")
     return DynamicFilterOutput(keep=True)
 
-def check_passrate(args, samples: list[Sample], **kwargs):fix
+
+def check_passrate(args, samples: list[Sample], **kwargs):
     """Keep groups only when passrate falls between the configured thresholds."""
     rewards = [_episode_reward(args, sample) for sample in samples]
     passrate = sum(1 for r in rewards if r > 0) / len(rewards) if rewards else 0
