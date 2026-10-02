@@ -2,6 +2,7 @@ import logging
 import random
 import socket
 from argparse import Namespace
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import nullcontext
 from typing import TYPE_CHECKING
 
@@ -36,7 +37,7 @@ from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint
 from .initialize import init, is_megatron_main_rank
 from .lora_utils import is_lora_enabled
-from .model import forward_only, initialize_model_and_optimizer, save, train
+from .model import forward_only, initialize_model_and_optimizer, save, save_hf_model, train
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import get_register_replay_list_func
 from .update_weight.common import named_params_and_buffers
@@ -200,6 +201,9 @@ class MegatronTrainRayActor(TrainRayActor):
             quantization_config=getattr(self.hf_config, "quantization_config", None),
             is_lora=is_lora_enabled(args),
         )
+
+        self.hf_writer = ThreadPoolExecutor(max_workers=1)
+        self.hf_write: Future[None] | None = None
 
         # empty cache after initialization
         clear_memory()
@@ -524,9 +528,19 @@ class MegatronTrainRayActor(TrainRayActor):
             maybe_finalize_async_save(blocking=True)
 
         if self.args.save_hf is not None and self.role == "actor":
-            from miles.backends.megatron_utils.model import save_hf_model
-
-            save_hf_model(self.args, rollout_id, self.model)
+            # One HF checkpoint is held in host memory at a time.
+            if self.hf_write is not None:
+                self.hf_write.result()
+            self.hf_write = save_hf_model(
+                self.args,
+                rollout_id,
+                self.model,
+                self.weights_backuper.get("actor"),
+                self.weight_updater.model_name,
+                self.hf_writer,
+            )
+            if force_sync and self.hf_write is not None:
+                self.hf_write.result()
 
         if self.args.offload_train:
             destroy_process_groups()

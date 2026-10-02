@@ -1,13 +1,19 @@
 import dataclasses
 import gc
+import json
 import logging
 import math
+import shutil
 from argparse import Namespace
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Executor, Future
+from contextlib import ExitStack
 from functools import partial
 from pathlib import Path
 
 import torch
+import torch.distributed as dist
+from huggingface_hub import split_torch_state_dict_into_shards
 from megatron.core import mpu
 from megatron.core.distributed import DistributedDataParallel as DDP
 from megatron.core.distributed import finalize_model_grads
@@ -20,6 +26,8 @@ from megatron.core.pipeline_parallel import get_forward_backward_func
 from megatron.core.utils import get_model_config
 from megatron.training.global_vars import get_args
 from megatron.training.training import get_model
+from safetensors import safe_open
+from safetensors.torch import save_file
 
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.memory_utils import clear_memory
@@ -42,6 +50,7 @@ from .initialize import is_megatron_main_rank
 from .lora_utils import is_lora_enabled, is_lora_model
 from .model_provider import get_model_provider_func
 from .parallel import get_packed_seq_params
+from .update_weight.hf_weight_iterator_base import HfWeightIteratorBase
 
 logger = logging.getLogger(__name__)
 
@@ -781,51 +790,51 @@ def save(
         enable_forward_pre_hook(model)
 
 
-def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
-    """Save Megatron model in HuggingFace format.
+def save_hf_model(
+    args: Namespace,
+    rollout_id: int,
+    model: Sequence[DDP],
+    weights: Mapping[str, torch.Tensor],
+    model_name: str,
+    writer: Executor,
+) -> Future[None] | None:
+    """Save the model in HuggingFace format to ``args.save_hf.format(rollout_id=rollout_id)``.
 
-    For LoRA models this saves both:
-    - A **merged** HF model (adapter weights folded into base) at ``{path}/``
-      so it can be loaded directly with ``AutoModelForCausalLM.from_pretrained``.
-    - An **adapter-only** HF PEFT checkpoint at ``{path}/adapter/``
-      so it can be loaded with ``PeftModel.from_pretrained``.
+    The weights are gathered by the iterator that syncs them to SGLang, so the checkpoint holds what rollouts are
+    served from. Rank 0 writes it on ``writer`` and returns the pending write; a LoRA model is saved through
+    Megatron-Bridge, merged, with its adapter-only checkpoint in ``{path}/adapter/``.
 
     This function is collective — all ranks must call it.
-
-    Args:
-        args: Runtime arguments.
-        model (Sequence[DDP]): Sequence of DDP-wrapped model chunks.
-        rollout_id (int): Rollout ID for path formatting.
     """
-    should_log = get_parallel_state().intra_dp_cp.rank == 0 and get_parallel_state().tp.rank == 0
-
-    try:
-        from megatron.bridge import AutoBridge
-
-        from miles.utils.megatron_bridge_utils import patch_megatron_model
-
-        path = Path(args.save_hf.format(rollout_id=rollout_id))
-
-        if should_log:
-            logger.info(f"Saving model in HuggingFace format to {path}")
-
-        bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
-
-        path.mkdir(parents=True, exist_ok=True)
-
-        with patch_megatron_model(model):
-            # For LoRA models, merge_adapter_weights=True (default) merges
-            # adapter weights into base weights for a standalone HF model.
-            bridge.save_hf_pretrained(model, path=path)
-
-        if should_log:
-            logger.info(f"Successfully saved merged HuggingFace model to {path}")
-    except Exception as e:
-        if should_log:
-            logger.error(f"Failed to save HuggingFace format: {e}")
-
-    # Additionally save adapter-only checkpoint for LoRA models
     if is_lora_model(model):
+        should_log = get_parallel_state().intra_dp_cp.rank == 0 and get_parallel_state().tp.rank == 0
+
+        try:
+            from megatron.bridge import AutoBridge
+
+            from miles.utils.megatron_bridge_utils import patch_megatron_model
+
+            path = Path(args.save_hf.format(rollout_id=rollout_id))
+
+            if should_log:
+                logger.info(f"Saving model in HuggingFace format to {path}")
+
+            bridge = AutoBridge.from_hf_pretrained(args.hf_checkpoint, trust_remote_code=True)
+
+            path.mkdir(parents=True, exist_ok=True)
+
+            with patch_megatron_model(model):
+                # For LoRA models, merge_adapter_weights=True (default) merges
+                # adapter weights into base weights for a standalone HF model.
+                bridge.save_hf_pretrained(model, path=path)
+
+            if should_log:
+                logger.info(f"Successfully saved merged HuggingFace model to {path}")
+        except Exception as e:
+            if should_log:
+                logger.error(f"Failed to save HuggingFace format: {e}")
+
+        # Additionally save adapter-only checkpoint for LoRA models
         try:
             adapter_path = Path(args.save_hf.format(rollout_id=rollout_id)) / "adapter"
             if should_log:
@@ -836,6 +845,60 @@ def save_hf_model(args, rollout_id: int, model: Sequence[DDP]) -> None:
         except Exception as e:
             if should_log:
                 logger.error(f"Failed to save LoRA adapter: {e}")
+        return None
+
+    iterator = HfWeightIteratorBase.create(args, model, model_name=model_name, quantization_config=None)
+    is_writer = dist.get_rank() == 0
+    tensors = {
+        name: tensor.to("cpu")
+        for chunk in iterator.get_hf_weight_chunks(weights)
+        for name, tensor in chunk
+        if is_writer
+    }
+    if not is_writer:
+        return None
+    path = Path(args.save_hf.format(rollout_id=rollout_id))
+    logger.info(f"Saving model in HuggingFace format to {path}")
+    return writer.submit(write_hf_checkpoint, path, tensors, Path(args.hf_checkpoint))
+
+
+def write_hf_checkpoint(path: Path, tensors: Mapping[str, torch.Tensor], source: Path) -> None:
+    """Write ``tensors`` as the HF checkpoint at ``source`` with them replaced; ``path`` appears once complete.
+
+    Every tensor must exist in ``source`` with the same shape. Tensors the Megatron model does not hold, such as a
+    vision tower or disabled MTP layers, keep their ``source`` values.
+    """
+    index = "model.safetensors.index.json"
+    weight_map = json.loads((source / index).read_text())["weight_map"]
+    with ExitStack() as stack:
+        files = {name: stack.enter_context(safe_open(source / name, "pt")) for name in set(weight_map.values())}
+        mismatched = sorted(
+            name
+            for name, tensor in tensors.items()
+            if name not in weight_map or files[weight_map[name]].get_slice(name).get_shape() != list(tensor.shape)
+        )
+        assert not mismatched, f"HF tensors absent from {source} or of another shape: {mismatched[:8]}"
+        complete = {
+            **tensors,
+            **{name: files[file].get_tensor(name) for name, file in weight_map.items() if name not in tensors},
+        }
+
+    staging = path.with_name(f"{path.name}.partial")
+    shutil.rmtree(staging, ignore_errors=True)
+    staging.mkdir(parents=True)
+    plan = split_torch_state_dict_into_shards(complete)
+    for filename, names in plan.filename_to_tensors.items():
+        save_file({name: complete[name].contiguous() for name in names}, staging / filename, metadata={"format": "pt"})
+    if plan.is_sharded:
+        (staging / index).write_text(
+            json.dumps({"metadata": plan.metadata, "weight_map": plan.tensor_to_filename}, indent=2)
+        )
+    for asset in source.iterdir():
+        if asset.is_file() and asset.suffix != ".safetensors" and asset.name != index:
+            shutil.copy(asset, staging / asset.name)
+    shutil.rmtree(path, ignore_errors=True)
+    staging.rename(path)
+    logger.info(f"Saved {path}: {len(tensors)} trained tensors, {len(complete) - len(tensors)} kept from {source}")
 
 
 def initialize_model_and_optimizer(
