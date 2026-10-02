@@ -535,7 +535,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 self.args,
                 rollout_id,
                 self.model,
-                self.weights_backuper.get("actor"),
+                dict(named_params_and_buffers(self.args, self.model)),
                 self.weight_updater.model_name,
                 self.hf_writer,
             )
