@@ -45,7 +45,7 @@ def flattened(trace: Trace) -> list[Trace]:
     return [trace] + [node for subtrace in trace.subtraces for node in flattened(subtrace)]
 
 
-async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> list[Sample]:
+async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample | list[Sample]:
     generate_fn, reward_fn = functions(
         os.environ["AVACORE_ROLLOUT_CONFIG"],
         f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
@@ -59,14 +59,15 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     except RECOVERABLE_ERRORS as error:
         logger.warning("AvaCore rollout of sample %s aborted: %r", sample.index, error)
         sample.status = Sample.Status.ABORTED
-        return [sample]
+        return sample
 
     assert isinstance(trace, TokenTrace), "AvaCore rollouts must drive the policy through a token-level client"
-    return [
+    samples = [
         filled(args, copy.deepcopy(sample), node, reward.score)
         for node in flattened(trace)
         if isinstance(node, TokenTrace) and any(segment.is_generated for segment in node.segments)
     ]
+    return samples[0] if len(samples) == 1 else samples
 
 
 def filled(args: Namespace, sample: Sample, trace: TokenTrace, reward: float) -> Sample:
