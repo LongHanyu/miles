@@ -865,22 +865,28 @@ def save_hf_model(
 def write_hf_checkpoint(path: Path, tensors: Mapping[str, torch.Tensor], source: Path) -> None:
     """Write ``tensors`` as the HF checkpoint at ``source`` with them replaced; ``path`` appears once complete.
 
-    Every tensor must exist in ``source`` with the same shape. Tensors the Megatron model does not hold, such as a
-    vision tower or disabled MTP layers, keep their ``source`` values.
+    Tensors ``source`` also holds must match its shapes. Modules the Megatron model does not hold, such as a vision
+    tower or disabled MTP layers, keep their ``source`` tensors; a module ``tensors`` covers is written only in its
+    layout, since ``source`` may store it differently (fused MoE experts against per-expert weights).
     """
     index = "model.safetensors.index.json"
     weight_map = json.loads((source / index).read_text())["weight_map"]
+    covered = {name.rsplit(".", depth)[0] for name in tensors for depth in range(1, name.count(".") + 1)}
     with ExitStack() as stack:
         files = {name: stack.enter_context(safe_open(source / name, "pt")) for name in set(weight_map.values())}
         mismatched = sorted(
             name
             for name, tensor in tensors.items()
-            if name not in weight_map or files[weight_map[name]].get_slice(name).get_shape() != list(tensor.shape)
+            if name in weight_map and files[weight_map[name]].get_slice(name).get_shape() != list(tensor.shape)
         )
-        assert not mismatched, f"HF tensors absent from {source} or of another shape: {mismatched[:8]}"
+        assert not mismatched, f"HF tensors of another shape than in {source}: {mismatched[:8]}"
         complete = {
             **tensors,
-            **{name: files[file].get_tensor(name) for name, file in weight_map.items() if name not in tensors},
+            **{
+                name: files[file].get_tensor(name)
+                for name, file in weight_map.items()
+                if name not in tensors and name.rsplit(".", 1)[0] not in covered
+            },
         }
 
     staging = path.with_name(f"{path.name}.partial")
