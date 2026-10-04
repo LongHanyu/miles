@@ -55,6 +55,14 @@ async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, A
     replay = {"return_routed_experts": True} if args.use_rollout_routing_replay else {}
     try:
         trace = await generate_fn(row, sampling_params=sampling_params, **replay)
+        if any(
+            message.metadata["finish_reason"]["type"] == "abort"
+            for node in flattened(trace)
+            for message in node.messages
+            if "finish_reason" in message.metadata
+        ):
+            sample.status = Sample.Status.ABORTED
+            return sample
         reward = await reward_fn(trace, row)
     except RECOVERABLE_ERRORS as error:
         logger.warning("AvaCore rollout of sample %s aborted: %r", sample.index, error)

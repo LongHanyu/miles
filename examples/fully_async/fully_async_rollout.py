@@ -135,6 +135,11 @@ class _WeightVersionTracker:
                 return None
             return self.cur_weight - baseline
 
+    def exceeds(self, group_id: int, max_staleness: int) -> bool:
+        with self._lock:
+            baseline = self._baselines.get(group_id)
+            return baseline is not None and self.cur_weight - baseline > max_staleness
+
     def discard(self, group_ids) -> None:
         """Drop baselines for groups that were pulled but never consumed.
 
@@ -236,14 +241,20 @@ class AsyncRolloutWorker:
                 # Clean up finished tasks; force-cancel any wedged past the deadline.
                 if active_tasks:
                     now = time.monotonic()
+                    max_staleness = getattr(self.args, "max_weight_staleness", None)
                     for task in active_tasks:
                         start, _, gid = task_meta[task]
-                        if not task.done() and now - start > _GROUP_HARD_DEADLINE_SECONDS:
+                        if task.done() or task.cancelling():
+                            continue
+                        if now - start > _GROUP_HARD_DEADLINE_SECONDS:
                             logger.warning(
                                 f"group {gid} exceeded {_GROUP_HARD_DEADLINE_SECONDS:.0f}s deadline "
                                 f"(ran {now - start:.0f}s); force-cancelling to reclaim the slot"
                             )
                             task.cancel()  # closes the httpx conn -> sglang aborts -> frees the slot
+                        elif max_staleness is not None and _weight_tracker.exceeds(gid, max_staleness):
+                            logger.info(f"group {gid} already exceeds max_weight_staleness; cancelling")
+                            task.cancel()
 
                     done_tasks = {task for task in active_tasks if task.done()}
                     for task in done_tasks:
