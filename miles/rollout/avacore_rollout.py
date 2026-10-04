@@ -1,81 +1,121 @@
-"""Rollouts generated and rewarded by AvaCore, as the TOML at ``AVACORE_ROLLOUT_CONFIG`` defines them.
-
-The document's ``[generate]`` and ``[reward]`` tables are structured by AvaCore; each sees a row of the
-sample's metadata plus ``prompt`` and ``label``. ``${SGLANG_ROUTER_URL}`` and ``${HF_CHECKPOINT}`` name the
-policy miles serves.
-"""
-
+import asyncio
 import copy
+import hashlib
+import itertools
+import json
 import logging
 import os
 import tomllib
 from argparse import Namespace
-from functools import cache
+from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pybase64
 from ava_core.config import interpolated, launch_converter
-from ava_core.core import TokenTrace, Trace
+from ava_core.core import Schema, TokenTrace, Trace
 from ava_core.generate.core import GenerateFunction
 from ava_core.generate.core import Sample as Row
 from ava_core.rewards import RewardFunction
+from ava_core.rewards.core import Reward
 from ava_core.runner import RECOVERABLE_ERRORS
+from ava_core.store.core import Run
+from ava_core.store.postgres import PostgresBackend
 
 from miles.utils.types import Sample
 
-__all__ = ["generate"]
+__all__ = ["AvaCoreRollout"]
 
 logger = logging.getLogger(__name__)
 
 
-@cache
-def functions(path: str, router: str, checkpoint: str) -> tuple[GenerateFunction[Row], RewardFunction[Row]]:
-    os.environ["SGLANG_ROUTER_URL"], os.environ["HF_CHECKPOINT"] = router, checkpoint
-    document = tomllib.loads(Path(path).read_text())
-    conv = launch_converter()
-    return (
-        conv.structure(interpolated(document["generate"]), GenerateFunction),
-        conv.structure(interpolated(document["reward"]), RewardFunction),
-    )
+class AvaCoreRollout:
+    def __init__(self, args: Namespace, config: Path) -> None:
+        os.environ["SGLANG_ROUTER_URL"] = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
+        os.environ["HF_CHECKPOINT"] = args.hf_checkpoint
+        self.args = args
+        self.document = tomllib.loads(config.read_text())
+        conv = launch_converter()
+        self.generate_fn = conv.structure(interpolated(self.document["generate"]), GenerateFunction)
+        self.reward_fn = conv.structure(interpolated(self.document["reward"]), RewardFunction)
+        self.postgres = interpolated(self.document["record"])["postgres"] if "record" in self.document else None
+        self.run: asyncio.Task[Run] | None = None
+        self.stack = AsyncExitStack()
+        self.trials = itertools.count()
+        self.writes: set[asyncio.Task[None]] = set()
+        self.failed_writes = 0
+
+    async def generate(self, sample: Sample, sampling_params: dict[str, Any]) -> Sample | list[Sample]:
+        row = Row({**sample.metadata, "prompt": sample.prompt, "label": sample.label}, key=lambda _: sample.index)
+        replay = {"return_routed_experts": True} if self.args.use_rollout_routing_replay else {}
+        try:
+            trace = await self.generate_fn(row, sampling_params=sampling_params, **replay)
+            if any(
+                message.metadata["finish_reason"]["type"] == "abort"
+                for node in flattened(trace)
+                for message in node.messages
+                if "finish_reason" in message.metadata
+            ):
+                sample.status = Sample.Status.ABORTED
+                return sample
+            reward = await self.reward_fn(trace, row)
+        except RECOVERABLE_ERRORS as error:
+            logger.warning("AvaCore rollout of sample %s aborted: %r", sample.index, error)
+            sample.status = Sample.Status.ABORTED
+            return sample
+
+        assert isinstance(trace, TokenTrace), "AvaCore rollouts must drive the policy through a token-level client"
+        if self.postgres is not None:
+            write = asyncio.create_task(self.record(row, trace, reward, sampling_params))
+            self.writes.add(write)
+            write.add_done_callback(self.writes.discard)
+        samples = [
+            filled(self.args, copy.deepcopy(sample), node, reward.score)
+            for node in flattened(trace)
+            if isinstance(node, TokenTrace) and any(segment.is_generated for segment in node.segments)
+        ]
+        return samples[0] if len(samples) == 1 else samples
+
+    async def open(self, sampling_params: dict[str, Any]) -> Run:
+        store = await self.stack.enter_async_context(PostgresBackend(self.postgres, min_size=1, max_size=4))
+        run_dir = Path(os.environ["RUN_DIR"])
+        run = await self.stack.enter_async_context(
+            store.rl_run(
+                model=run_dir.parent.name,
+                run=run_dir.name,
+                collection=Path(self.args.prompt_data).stem,
+                sampling_params=sampling_params,
+                config=self.document,
+                schema=Schema(),
+            )
+        )
+        await run.update(status="running")
+        return run
+
+    async def record(self, row: Row, trace: TokenTrace, reward: Reward, sampling_params: dict[str, Any]) -> None:
+        try:
+            if self.run is None:
+                self.run = asyncio.create_task(self.open(sampling_params))
+            run = await self.run
+            await run.create_rollout(
+                query_id=hashlib.md5(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest(),
+                trial_id=next(self.trials),
+                instance=row,
+                trace=trace,
+                reward=reward,
+                status="completed",
+            )
+        except Exception as error:
+            self.failed_writes += 1
+            if self.failed_writes in (1, 10, 100) or self.failed_writes % 1000 == 0:
+                logger.warning(
+                    "Recording rollouts to Postgres failed %d times; last error: %r", self.failed_writes, error
+                )
 
 
 def flattened(trace: Trace) -> list[Trace]:
     return [trace] + [node for subtrace in trace.subtraces for node in flattened(subtrace)]
-
-
-async def generate(args: Namespace, sample: Sample, sampling_params: dict[str, Any]) -> Sample | list[Sample]:
-    generate_fn, reward_fn = functions(
-        os.environ["AVACORE_ROLLOUT_CONFIG"],
-        f"http://{args.sglang_router_ip}:{args.sglang_router_port}",
-        args.hf_checkpoint,
-    )
-    row = Row({**sample.metadata, "prompt": sample.prompt, "label": sample.label}, key=lambda _: sample.index)
-    replay = {"return_routed_experts": True} if args.use_rollout_routing_replay else {}
-    try:
-        trace = await generate_fn(row, sampling_params=sampling_params, **replay)
-        if any(
-            message.metadata["finish_reason"]["type"] == "abort"
-            for node in flattened(trace)
-            for message in node.messages
-            if "finish_reason" in message.metadata
-        ):
-            sample.status = Sample.Status.ABORTED
-            return sample
-        reward = await reward_fn(trace, row)
-    except RECOVERABLE_ERRORS as error:
-        logger.warning("AvaCore rollout of sample %s aborted: %r", sample.index, error)
-        sample.status = Sample.Status.ABORTED
-        return sample
-
-    assert isinstance(trace, TokenTrace), "AvaCore rollouts must drive the policy through a token-level client"
-    samples = [
-        filled(args, copy.deepcopy(sample), node, reward.score)
-        for node in flattened(trace)
-        if isinstance(node, TokenTrace) and any(segment.is_generated for segment in node.segments)
-    ]
-    return samples[0] if len(samples) == 1 else samples
 
 
 def filled(args: Namespace, sample: Sample, trace: TokenTrace, reward: float) -> Sample:

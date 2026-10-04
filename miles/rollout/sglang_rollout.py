@@ -6,6 +6,7 @@ import uuid
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -102,6 +103,12 @@ class GenerateState(metaclass=SingletonMeta):
         if getattr(args, "sglang_enable_deterministic_inference", False):
             sampling_seed_base = args.rollout_seed
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
+
+        self.avacore = None
+        if config := os.environ.get("AVACORE_ROLLOUT_CONFIG"):
+            from miles.rollout.avacore_rollout import AvaCoreRollout
+
+            self.avacore = AvaCoreRollout(args, Path(config))
 
         # dp rank balancing
         self.dp_counts = [0] * (args.sglang_dp_size or 1)
@@ -294,10 +301,8 @@ async def generate_and_rm(
             custom_func_path = getattr(sample, "generate_function_path", None) or args.custom_generate_function_path
 
             generate_fn = load_generate_function(custom_func_path) if custom_func_path else None
-            if os.environ.get("AVACORE_ROLLOUT_CONFIG"):
-                from miles.rollout import avacore_rollout
-
-                generated = await avacore_rollout.generate(args, sample, sampling_params)
+            if state.avacore is not None:
+                generated = await state.avacore.generate(sample, sampling_params)
             elif generate_fn is not None:
                 output = await generate_fn(
                     GenerateFnInput(state=state, sample=sample, sampling_params=sampling_params, evaluation=evaluation)
