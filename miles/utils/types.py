@@ -14,6 +14,7 @@ class Sample:
 
     group_index: int | None = None
     index: int | None = None
+    epoch: int | None = None
     # prompt
     prompt: str | list[dict[str, str]] = ""
     tokens: list[int] = field(default_factory=list)

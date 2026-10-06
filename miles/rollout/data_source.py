@@ -145,10 +145,12 @@ class RolloutDataSource(DataSource):
         samples = []
         for prompt_sample in prompt_samples:
             group = []
+            epoch = self.sample_group_index // len(self.dataset) if self.dataset is not None else None
             for _ in range(self.args.n_samples_per_prompt):
                 sample = copy.deepcopy(prompt_sample)
                 sample.group_index = self.sample_group_index
                 sample.index = self.sample_index
+                sample.epoch = epoch
                 sample = apply_system_prompt(sample, self.system_prompt, self.seed, self.tokenizer)
                 self.sample_index += 1
                 group.append(sample)

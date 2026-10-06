@@ -1,8 +1,5 @@
 import asyncio
 import copy
-import hashlib
-import itertools
-import json
 import logging
 import os
 import tomllib
@@ -42,7 +39,6 @@ class AvaCoreRollout:
         self.postgres = interpolated(self.document["record"])["postgres"] if "record" in self.document else None
         self.run: asyncio.Task[Run] | None = None
         self.stack = AsyncExitStack()
-        self.trials = itertools.count()
         self.writes: set[asyncio.Task[None]] = set()
         self.failed_writes = 0
 
@@ -67,7 +63,7 @@ class AvaCoreRollout:
 
         assert isinstance(trace, TokenTrace), "AvaCore rollouts must drive the policy through a token-level client"
         if self.postgres is not None:
-            write = asyncio.create_task(self.record(row, trace, reward, sampling_params))
+            write = asyncio.create_task(self.record(row, sample, trace, reward, sampling_params))
             self.writes.add(write)
             write.add_done_callback(self.writes.discard)
         samples = [
@@ -93,18 +89,30 @@ class AvaCoreRollout:
         await run.update(status="running")
         return run
 
-    async def record(self, row: Row, trace: TokenTrace, reward: Reward, sampling_params: dict[str, Any]) -> None:
+    async def record(
+        self,
+        row: Row,
+        sample: Sample,
+        trace: TokenTrace,
+        reward: Reward,
+        sampling_params: dict[str, Any],
+    ) -> None:
         try:
+            assert sample.epoch is not None and sample.index is not None
+            n = self.args.n_samples_per_prompt
+            query_id = str(sample.metadata["_index"])
+            trial_id = sample.epoch * n + sample.index % n
             if self.run is None:
                 self.run = asyncio.create_task(self.open(sampling_params))
             run = await self.run
             await run.create_rollout(
-                query_id=hashlib.md5(json.dumps(row, sort_keys=True, default=str).encode()).hexdigest(),
-                trial_id=next(self.trials),
+                query_id=query_id,
+                trial_id=trial_id,
                 instance=row,
                 trace=trace,
                 reward=reward,
                 status="completed",
+                metadata={"weight_version": int(trace.last_assistant().metadata["weight_version"])},
             )
         except Exception as error:
             self.failed_writes += 1

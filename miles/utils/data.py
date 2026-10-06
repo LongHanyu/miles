@@ -207,7 +207,7 @@ class Dataset:
         reader = read_file(path)
         if data_filter is not None:
             reader = data_filter(reader)
-        for data in reader:
+        for index, data in enumerate(reader):
             # Both chat templates and multimodal inputs require conversation format (list of message dicts)
             as_conversation = apply_chat_template or (multimodal_keys is not None)
             prompt = _build_messages(data, prompt_key, as_conversation, multimodal_keys)
@@ -235,6 +235,7 @@ class Dataset:
             else:
                 output_prompt = prompt
 
+            metadata["_index"] = index
             metadata["_messages_dict"] = prompt
             metadata["_apply_chat_template_fn"] = partial(
                 chat_template_utils.apply_chat_template,
