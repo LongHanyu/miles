@@ -1,12 +1,10 @@
 import asyncio
 import copy
 import logging
-import os
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
 from contextlib import contextmanager
-from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -105,10 +103,10 @@ class GenerateState(metaclass=SingletonMeta):
             self.group_sampling_seeds = [sampling_seed_base + i for i in range(args.n_samples_per_prompt)]
 
         self.avacore = None
-        if config := os.environ.get("AVACORE_ROLLOUT_CONFIG"):
+        if (config := getattr(args, "avacore_config", None)) is not None:
             from miles.rollout.avacore_rollout import AvaCoreRollout
 
-            self.avacore = AvaCoreRollout(args, Path(config))
+            self.avacore = AvaCoreRollout(args, config)
 
         # dp rank balancing
         self.dp_counts = [0] * (args.sglang_dp_size or 1)

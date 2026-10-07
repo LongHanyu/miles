@@ -2,8 +2,8 @@ import asyncio
 import copy
 import logging
 import os
-import tomllib
 from argparse import Namespace
+from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from pathlib import Path
 from typing import Any
@@ -28,11 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 class AvaCoreRollout:
-    def __init__(self, args: Namespace, config: Path) -> None:
+    def __init__(self, args: Namespace, config: Mapping[str, Any]) -> None:
         os.environ["SGLANG_ROUTER_URL"] = f"http://{args.sglang_router_ip}:{args.sglang_router_port}"
         os.environ["HF_CHECKPOINT"] = args.hf_checkpoint
         self.args = args
-        self.document = tomllib.loads(config.read_text())
+        self.document = config
         conv = launch_converter()
         self.generate_fn = conv.structure(interpolated(self.document["generate"]), GenerateFunction)
         self.reward_fn = conv.structure(interpolated(self.document["reward"]), RewardFunction)
