@@ -12,6 +12,12 @@ PATH_ARGS = ["--rollout-function-path", "--custom-generate-function-path"]
 REQUIRED_ARGS = ["--rollout-batch-size", "64"]
 
 
+def test_help_is_renderable():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    assert "Specify the key in the reward dict" in " ".join(parser.format_help().split())
+
+
 def make_class_with_add_arguments():
     class MyFn:
         @classmethod
