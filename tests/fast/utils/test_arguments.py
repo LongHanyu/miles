@@ -88,6 +88,12 @@ def _clear_mooncake_env(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+def test_help_is_renderable():
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    assert "Specify the key in the reward dict" in " ".join(parser.format_help().split())
+
+
 def make_class_with_add_arguments():
     class MyFn:
         @classmethod
