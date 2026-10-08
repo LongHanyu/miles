@@ -54,6 +54,23 @@ def example():
     )
 
 
+def test_prepared_sequence_groups_do_not_enter_token_metric_logging(monkeypatch):
+    from miles.backends.training_utils import log_utils
+
+    state()
+    data = example()
+    options = args(ci_test=False, log_multi_turn=False, log_passrate=False, log_correct_samples=False)
+    prepare_sequence_groups(options, data, [6])
+    captured = {}
+    monkeypatch.setattr(log_utils, "gather_log_data", lambda _name, _args, _id, metrics: captured.update(metrics))
+
+    log_utils.log_rollout_data(0, options, data)
+
+    assert "log_probs" in captured
+    assert not {"sequence_group_ids", "sequence_group_kl", "sequence_segment_kl"} & captured.keys()
+    assert "sequence_group_kl" in data
+
+
 def test_grouped_gspo_matches_unsplit_loss_gradient_and_optimizer_across_microbatches():
     state()
     data = example()
