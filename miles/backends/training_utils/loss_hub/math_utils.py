@@ -204,6 +204,8 @@ def compute_gspo_kl(
     full_old_log_probs: list[torch.Tensor],
     local_log_probs: list[torch.Tensor],
     loss_masks: list[torch.Tensor],
+    sequence_group_kl: list[torch.Tensor] | None = None,
+    sequence_segment_kl: list[torch.Tensor] | None = None,
 ) -> torch.Tensor:
     """Compute GSPO-style per-sequence KL divergence.
 
@@ -222,6 +224,15 @@ def compute_gspo_kl(
         ((old_logprob - log_prob) * loss_mask).sum() / torch.clamp_min(loss_mask.sum(), 1)
         for log_prob, old_logprob, loss_mask in zip(full_log_probs, full_old_log_probs, loss_masks, strict=False)
     ]
+    if sequence_group_kl is not None:
+        if sequence_segment_kl is None:
+            raise ValueError("Grouped GSPO requires a verified pre-update forward pass")
+        for kl, cached in zip(ppo_kl, sequence_segment_kl, strict=True):
+            if not torch.isclose(kl.detach().double(), cached.double(), atol=1e-4, rtol=1e-4):
+                raise RuntimeError("Grouped GSPO forward drift: check dropout, routing replay and optimizer steps")
+        # Every segment uses the episode's clipping decision. Its local mean
+        # retains the gradient; sample_weights supply its token fraction once.
+        ppo_kl = [group.to(kl) + (kl - kl.detach()) for kl, group in zip(ppo_kl, sequence_group_kl, strict=True)]
     ppo_kl = [kl.expand_as(log_prob) for kl, log_prob in zip(ppo_kl, local_log_probs, strict=False)]
     ppo_kl = torch.cat(ppo_kl, dim=0)
 

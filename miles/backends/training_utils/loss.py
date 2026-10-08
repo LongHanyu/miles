@@ -120,6 +120,7 @@ def loss_function(
         args.calculate_per_token_loss,
         args.qkv_format,
         batch.get("max_seq_lens", None),
+        sample_weights=batch.get("sample_weights"),
     )
 
     func = get_loss_function(args)

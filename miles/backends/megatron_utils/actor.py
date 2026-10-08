@@ -34,6 +34,7 @@ from ..training_utils.data import DataIterator, get_data_iterator, get_rollout_d
 from ..training_utils.log_utils import log_cpu_memory, log_perf_data, log_rollout_data
 from ..training_utils.loss import compute_advantages_and_returns, get_log_probs_and_entropy, get_values
 from ..training_utils.parallel import get_parallel_state
+from ..training_utils.sequence_groups import prepare_sequence_groups
 from .checkpoint import load_checkpoint
 from .initialize import init, is_megatron_main_rank
 from .lora_utils import is_lora_enabled
@@ -433,7 +434,11 @@ class MegatronTrainRayActor(TrainRayActor):
                         )
                     )
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
-                if not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics:
+                if (
+                    not self.args.use_rollout_logprobs
+                    or self.args.get_mismatch_metrics
+                    or "sequence_group_ids" in rollout_data
+                ):
                     for m in all_replay_managers:
                         if m.enabled:
                             if self._use_rollout_replay(m):
@@ -463,6 +468,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 # Calculate adv and returns. Need to performed before training (instead of on the fly),
                 # because we may need normalize the whole rollout.
                 compute_advantages_and_returns(self.args, rollout_data)
+
+            prepare_sequence_groups(self.args, rollout_data, num_microbatches)
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)

@@ -152,6 +152,8 @@ def split_train_data_by_dp(args, data, dp_size):
             "loss_masks",
             "round_number",
             "sample_indices",
+            "sample_weights",
+            "sequence_group_ids",
             "rollout_log_probs",
             "rollout_routed_experts",
             "prompt",
