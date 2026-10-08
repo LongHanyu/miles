@@ -99,6 +99,7 @@ def get_sum_of_sample_mean(
     max_seq_lens: list[int] | None = None,
     *,
     denominators: list[torch.Tensor] | torch.Tensor | None = None,
+    sample_weights: list[float] | None = None,
 ) -> Callable[[torch.Tensor], torch.Tensor]:
     """Calculate correct sample mean for CP; ``denominators`` overrides each
     sample's own ``loss_mask.sum()`` (e.g. pass ``rollout_mask_sums`` for
@@ -107,15 +108,18 @@ def get_sum_of_sample_mean(
         denominators = [m.sum() for m in loss_masks]
 
     parallel_state = get_parallel_state()
+    if sample_weights is not None and calculate_per_token_loss:
+        raise ValueError("Sample weights require sample-mean loss reduction")
+    weights = sample_weights if sample_weights is not None else [1.0] * len(loss_masks)
     cp_size = parallel_state.cp.size
     if cp_size == 1:
 
         def sum_of_sample_mean(x: torch.Tensor) -> torch.Tensor:
             return sum(
                 [
-                    (x_i * loss_mask_i).sum() / torch.clamp_min(denominator, 1)
-                    for x_i, loss_mask_i, denominator in zip(
-                        x.split(response_lengths, dim=0), loss_masks, denominators, strict=True
+                    weight * (x_i * loss_mask_i).sum() / torch.clamp_min(denominator, 1)
+                    for x_i, loss_mask_i, denominator, weight in zip(
+                        x.split(response_lengths, dim=0), loss_masks, denominators, weights, strict=True
                     )
                 ]
             )
@@ -143,9 +147,9 @@ def get_sum_of_sample_mean(
         def sum_of_sample_mean(x: torch.Tensor) -> torch.Tensor:
             return sum(
                 [
-                    (x_i * chunked_loss_mask).sum() / torch.clamp_min(denominator, 1)
-                    for x_i, chunked_loss_mask, denominator in zip(
-                        x.split(cp_chunk_lengths, dim=0), chunked_loss_masks, denominators, strict=True
+                    weight * (x_i * chunked_loss_mask).sum() / torch.clamp_min(denominator, 1)
+                    for x_i, chunked_loss_mask, denominator, weight in zip(
+                        x.split(cp_chunk_lengths, dim=0), chunked_loss_masks, denominators, weights, strict=True
                     )
                 ]
             )

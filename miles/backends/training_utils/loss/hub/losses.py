@@ -94,6 +94,8 @@ def policy_loss_function(
         are enabled.
     """
     parallel_state = get_parallel_state()
+    if batch.get("sequence_group_ids") is not None and batch.get("sequence_group_kl") is None:
+        raise ValueError("Missing episode statistics: grouped GSPO must run its pre-update scoring pass")
     advantages_list = [advantage.detach() for advantage in batch["advantages"]]
     advantages = torch.cat(advantages_list, dim=0)
     rollout_old_log_probs = (
@@ -182,6 +184,8 @@ def policy_loss_function(
             full_old_log_probs=full_old_log_probs,
             local_log_probs=log_probs,
             loss_masks=batch["loss_masks"],
+            sequence_group_kl=batch.get("sequence_group_kl"),
+            sequence_segment_kl=batch.get("sequence_segment_kl"),
         )
         old_log_probs = torch.cat(old_log_probs, dim=0)
         log_probs = torch.cat(log_probs, dim=0)
@@ -295,6 +299,7 @@ def policy_loss_function(
             args.qkv_format,
             max_seq_lens,
             denominators=batch.get("rollout_mask_sums", None),
+            sample_weights=batch.get("sample_weights"),
         )
 
     # Determine pg_loss reducer: use custom if specified, otherwise default

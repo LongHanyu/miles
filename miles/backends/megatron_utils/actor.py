@@ -60,6 +60,7 @@ from miles.utils.workers.rpc.common.wire_types import Pickled
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.parallel import get_parallel_state
+from ..training_utils.sequence_groups import prepare_sequence_groups
 from .checkpoint import load_checkpoint
 from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
@@ -714,7 +715,9 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
                 self._switch_model("old_actor" if self.args.keep_old_actor else "actor")
                 if not skip_actor_forward_only and (
-                    not self.args.use_rollout_logprobs or self.args.get_mismatch_metrics
+                    not self.args.use_rollout_logprobs
+                    or self.args.get_mismatch_metrics
+                    or "sequence_group_ids" in rollout_data
                 ):
                     for m in all_replay_managers:
                         if m.enabled:
@@ -752,6 +755,8 @@ class MegatronTrainRayActor(TrainRayActor):
                 # because we may need normalize the whole rollout.
                 compute_advantages_and_returns(self.args, rollout_data)
                 log_train_advantage_computation_event(rollout_data)
+
+            prepare_sequence_groups(self.args, rollout_data, num_microbatches)
 
             if self.rollout_data_postprocess is not None:
                 self.rollout_data_postprocess(self.args)
