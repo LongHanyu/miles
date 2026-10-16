@@ -831,6 +831,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
 
             # sampling
             parser.add_argument(
+                "--rollout-sample-max-retries",
+                type=int,
+                default=0,
+                help=(
+                    "Extra attempts for a training trajectory that raises an exception. "
+                    "Only the failed trajectory is reset; siblings continue and successful results "
+                    "are retained. Default 0 disables retries. Exhaustion propagates the error after "
+                    "siblings finish; explicit cancellation is never retried. Does not apply to eval, "
+                    "returned ABORTED samples, group reward failures, or stale-group recycling."
+                ),
+            )
+            parser.add_argument(
                 "--over-sampling-batch-size",
                 type=int,
                 default=None,
@@ -3873,6 +3885,7 @@ def miles_validate_args(args):
             f"chunk={args.offload_train_disk_chunk_mb}MB, moments={args.stream_optimizer_state_moment_dtype}"
         )
 
+    assert args.rollout_sample_max_retries >= 0, "--rollout-sample-max-retries must be nonnegative"
     if args.async_max_concurrent_samples is not None:
         assert args.async_max_concurrent_samples >= args.n_samples_per_prompt, (
             f"--async-max-concurrent-samples ({args.async_max_concurrent_samples}) must be at least "

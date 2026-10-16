@@ -16,6 +16,7 @@ def test_group_waits_for_peer_cleanup(monkeypatch, refactored, cancel_parent):
 
     async def scenario():
         started, release, cleaned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        failed = asyncio.Event()
         peers = []
 
         async def generate(_, sample, *args, **kwargs):
@@ -24,6 +25,7 @@ def test_group_waits_for_peer_cleanup(monkeypatch, refactored, cancel_parent):
                 await started.wait()
                 if cancel_parent:
                     await release.wait()
+                failed.set()
                 raise RuntimeError("trial failed")
             started.set()
             try:
@@ -41,12 +43,18 @@ def test_group_waits_for_peer_cleanup(monkeypatch, refactored, cancel_parent):
             await started.wait()
             if cancel_parent:
                 parent.cancel()
+            else:
+                await failed.wait()
+                await asyncio.sleep(0)
+                assert not parent.done()
+                assert not peers[1].done()
+                release.set()
             with pytest.raises(asyncio.CancelledError if cancel_parent else RuntimeError):
                 await parent
             # The caller may now reset/reuse the same Sample objects for retry.
             assert cleaned.is_set()
             assert all(peer.done() for peer in peers)
-            assert group[1].reward is None
+            assert group[1].reward == (None if cancel_parent else 1)
         finally:
             release.set()
             await asyncio.gather(*peers, return_exceptions=True)
