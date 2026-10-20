@@ -822,6 +822,9 @@ class MegatronTrainRayActor(TrainRayActor):
             return
 
         self._finalize_pending_async_save()
+        if self.args.async_save:
+            # Reclaim completed staging before allocating the next checkpoint.
+            clear_memory(clear_host_memory=True)
 
         save(
             rollout_id,
@@ -837,6 +840,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if force_sync:
             self._finalize_pending_async_save()
+
+        if not self.args.async_save or force_sync:
+            # Only unused pinned blocks are released; live optimizer buffers stay.
+            clear_memory(clear_host_memory=True)
 
         if self.args.custom_megatron_post_save_hook_path is not None and dist.get_rank() == 0:
             self._finalize_pending_async_save()

@@ -93,9 +93,10 @@ async def test_attempt_ends_when_generate_raises(lifecycle_sink):
     ]
 
 
-async def test_cancelled_group_sibling_ends_attempt(lifecycle_sink):
+async def test_failed_group_sibling_finishes_attempt(lifecycle_sink):
     all_started = asyncio.Event()
-    never_finishes = asyncio.Event()
+    failed = asyncio.Event()
+    release = asyncio.Event()
     started = 0
     cancelled = []
 
@@ -107,17 +108,24 @@ async def test_cancelled_group_sibling_ends_attempt(lifecycle_sink):
         try:
             await all_started.wait()
             if input.sample.index == 1:
+                failed.set()
                 raise RuntimeError("sample failed")
-            await never_finishes.wait()
+            await release.wait()
+            return GenerateFnOutput(samples=input.sample)
         except asyncio.CancelledError:
             cancelled.append(input.sample.index)
             raise
 
     samples = [Sample(index=1), Sample(index=2)]
+    task = asyncio.create_task(common.generate_and_rm_group(make_state(generate), samples, sampling_params={}))
+    await failed.wait()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
     with pytest.raises(RuntimeError, match="sample failed"):
-        await common.generate_and_rm_group(make_state(generate), samples, sampling_params={})
+        await task
 
-    assert cancelled == [2]
+    assert cancelled == []
     for sample in samples:
         assert [kind for kind, index in lifecycle_sink.events if index == sample.index] == [
             "attempt_start",

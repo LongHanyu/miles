@@ -129,6 +129,49 @@ async def test_drain_collects_batch_sorted_with_metrics(monkeypatch):
     assert len(output2.samples) == 3
 
 
+@pytest.mark.parametrize("granularity", ["sample", "group"])
+async def test_failed_trajectory_is_retried_before_buffering(monkeypatch, granularity):
+    prompt_group = make_group(1, weight_versions=["3"])
+    data_source = FakeDataSource(scripted=[prompt_group])
+    calls = []
+
+    async def generate_sample(state, sample, sampling_params, evaluation=False):
+        if sample.group_index == 1:
+            calls.append(sample.index)
+            if sample is prompt_group[0] and calls.count(sample.index) == 1:
+                raise RuntimeError("transient trial failure")
+            sample.status, sample.reward = Sample.Status.COMPLETED, 1
+            sample.tokens, sample.response, sample.response_length = [1, 2], "ok", 1
+            if sample is prompt_group[0]:
+                sample.weight_versions = [
+                    WeightVersionsPerCall(spans=[WeightVersionSpan(version="4", abs_start=1, abs_end=2)])
+                ]
+        return sample
+
+    monkeypatch.setattr(rollout_common, "generate_and_rm", generate_sample)
+    monkeypatch.setattr(rollout_common, "policy_uses_routing_key", lambda args: False)
+    args = make_args(
+        rollout_batch_size=1,
+        async_max_concurrent_samples=2,
+        rollout_submission_granularity=granularity,
+        group_rm=False,
+        rollout_sample_max_retries=1,
+        max_weight_staleness=1,
+    )
+    fn = make_fn(monkeypatch, args, data_source, generate=rollout_common.generate_and_rm_group)
+    try:
+        output = await asyncio.wait_for(fn(RolloutFnTrainInput(rollout_id=0, weight_version=4)), timeout=3)
+        assert output.samples == [prompt_group]
+        assert calls.count(prompt_group[0].index) == 2
+        assert calls.count(prompt_group[1].index) == 1
+        assert prompt_group[1].oldest_weight_version == 3
+        assert data_source.recycled == []
+        assert not fn._worker.done()
+    finally:
+        fn._worker.cancel()
+        await asyncio.gather(fn._worker, return_exceptions=True)
+
+
 async def test_eval_without_fleet_pauses_producer(monkeypatch):
     """Shared-engine eval: producer submissions pause during eval and resume after."""
     release = asyncio.Event()

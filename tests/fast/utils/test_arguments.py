@@ -94,6 +94,15 @@ def test_help_is_renderable():
     assert "Specify the key in the reward dict" in " ".join(parser.format_help().split())
 
 
+@pytest.mark.parametrize("extra,expected", [([], 0), (["--rollout-sample-max-retries", "2"], 2)])
+def test_rollout_sample_retry_budget(extra, expected):
+    with patch.object(sys, "argv", ["test"] + REQUIRED_ARGS + extra):
+        parser = argparse.ArgumentParser()
+        get_miles_extra_args_provider()(parser)
+        args, _ = parser.parse_known_args()
+    assert args.rollout_sample_max_retries == expected
+
+
 def make_class_with_add_arguments():
     class MyFn:
         @classmethod

@@ -15,6 +15,7 @@ from tqdm import tqdm
 from miles.rollout.base_types import GenerateFnInput, RolloutFnEvalOutput, RolloutFnTrainOutput
 from miles.rollout.filter_hub.base_types import MetricGatherer
 from miles.rollout.filter_hub.common_filters import apply_preput_filters
+from miles.rollout.generate_utils.group import generate_group
 from miles.rollout.generate_utils.rollout_topk_logprobs import (
     append_rollout_topk_logprobs,
     configure_rollout_topk_logprobs_request,
@@ -401,26 +402,18 @@ async def generate_and_rm_group(
             if sample.routing_key is None:
                 sample.routing_key = str(uuid.uuid4())
 
-    tasks = []
-    for idx, sample in enumerate(group):
+    async def generate_sample(idx, sample):
         current_sampling_params = sampling_params.copy()
         if getattr(args, "sglang_enable_deterministic_inference", False):
             seed = state.group_sampling_seeds[idx]
             current_sampling_params["sampling_seed"] = seed
-        tasks.append(
-            asyncio.create_task(
-                generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation, timeout=timeout)
-            )
-        )
+        return await generate_and_rm(args, sample, current_sampling_params, evaluation=evaluation, timeout=timeout)
 
-    try:
-        group = await asyncio.gather(*tasks)
-    except BaseException:
-        # The caller may recycle these same Sample objects after a failure.
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    group = await generate_group(
+        group,
+        generate_sample,
+        max_retries=0 if evaluation else getattr(args, "rollout_sample_max_retries", 0),
+    )
 
     # for the rm that need the whole group, we will do the rm here
     if not state.aborted and args.group_rm:

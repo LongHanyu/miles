@@ -251,24 +251,33 @@ async def test_backfill_does_not_oversubmit_below_one_group(monkeypatch):
     assert len(output.samples) == 2
 
 
-async def test_failed_sample_cancels_siblings_and_conserves_credits(monkeypatch):
-    """One sample raising must not leave siblings running or credits unreturned."""
+async def test_failed_sample_waits_for_siblings_and_conserves_credits(monkeypatch):
+    """Failure releases one slot, not the credits of still-running siblings."""
     from miles.rollout.inference_rollout import inference_rollout_common as common
+
+    release = asyncio.Event()
 
     async def fake_generate_and_rm(state, sample, sampling_params, evaluation=False):
         if sample.index == 10:  # first sample of make_group(1)
             raise RuntimeError("sample failed")
-        await asyncio.Event().wait()  # runs until cancelled
+        await release.wait()
+        return sample
 
     monkeypatch.setattr(common, "generate_and_rm", fake_generate_and_rm)
 
     fired = []
     state = FakeGenerateState(make_args())
-    with pytest.raises(RuntimeError, match="sample failed"):
-        await common.generate_and_rm_group(
+    task = asyncio.create_task(
+        common.generate_and_rm_group(
             state, make_group(1), sampling_params={}, sample_done_callback=lambda: fired.append(1)
         )
-    # every sample task settled (cancelled included) before the group raised
+    )
+    await asyncio.sleep(0.01)
+    assert not task.done() and len(fired) == 1
+    release.set()
+    with pytest.raises(RuntimeError, match="sample failed"):
+        await task
+    # Every slot returns its credit once, after its trajectory settles.
     assert len(fired) == GROUP_SIZE
 
 

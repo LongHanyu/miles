@@ -19,6 +19,7 @@ from miles.rollout.base_types import (
 )
 from miles.rollout.generate_hub.single_turn import generate
 from miles.rollout.generate_utils.generate_endpoint_utils import policy_uses_routing_key
+from miles.rollout.generate_utils.group import generate_group
 from miles.rollout.inference_rollout.compatibility import load_generate_function
 from miles.rollout.rm_hub import async_rm, batched_async_rm
 from miles.utils.lifecycle import TrajectoryLifecycle
@@ -154,26 +155,19 @@ async def generate_and_rm_group(
 
     log_prefix = f"[group indices={[getattr(s, 'index', '?') for s in group]}]"
     logger.debug(f"{log_prefix} Starting group with {len(group)} samples")
-    tasks = []
-    for idx, sample in enumerate(group):
+
+    async def generate_sample(idx, sample):
         current_sampling_params = sampling_params.copy()
         if getattr(args, "sglang_enable_deterministic_inference", False):
             current_sampling_params["sampling_seed"] = args.rollout_seed + idx
-        task = asyncio.create_task(generate_and_rm(state, sample, current_sampling_params, evaluation=evaluation))
-        if sample_done_callback is not None:
-            # fires on success, exception, and cancellation, so in-flight accounting is conserved
-            task.add_done_callback(lambda _task: sample_done_callback())
-        tasks.append(task)
+        return await generate_and_rm(state, sample, current_sampling_params, evaluation=evaluation)
 
-    try:
-        group = await asyncio.gather(*tasks)
-    except BaseException:
-        # cancel siblings and let them settle: the group returns only after every
-        # sample task is done, so no orphan generation or in-flight credit outlives it
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        raise
+    group = await generate_group(
+        group,
+        generate_sample,
+        max_retries=0 if evaluation else getattr(args, "rollout_sample_max_retries", 0),
+        sample_done_callback=sample_done_callback,
+    )
     logger.debug(f"{log_prefix} [group] All {len(group)} samples completed")
     if state.aborted:
         return group
