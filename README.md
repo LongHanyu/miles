@@ -158,3 +158,16 @@ Repository:
   howpublished = {\url{https://github.com/radixark/miles}}
 }
 ```
+
+## Optional chunked FP32 LM head
+
+`--chunked-lm-head-size 1024` chunks the vocabulary projection along tokens and
+recomputes each chunk in backward. The default `0` keeps the existing logits
+path. Unlike `--log-probs-chunk-size`, this bounds projection memory before
+full-sequence logits are materialized.
+
+Requires Megatron's `GPTModel.forward(output_processor=...)` interface, an
+already configured untied, bias-free FP32 output head, packed THD inputs,
+PP=CP=1, `--overlap-param-gather` disabled and policy loss without entropy. TP and sequence parallelism are
+supported. Unsupported modes fail explicitly; enabling the flag does not
+change head precision, model parameters or checkpoint format.

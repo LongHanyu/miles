@@ -590,6 +590,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
             )
             parser.add_argument(
+                "--chunked-lm-head-size",
+                type=int,
+                default=0,
+                help=("Experimental FP32 sampled-logprob projection chunks; 0 keeps the existing logits path. "
+                      "Requires Megatron GPT output_processor, PP=CP=1, no entropy/MTP/LoRA."),
+            )
+            parser.add_argument(
                 "--allgather-cp",
                 action="store_true",
                 default=False,
@@ -4061,6 +4068,11 @@ def miles_validate_args(args):
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
+
+    if args.chunked_lm_head_size:
+        from miles.backends.megatron_utils.chunked_lm_head import chunked_head_kwargs
+
+        chunked_head_kwargs(args)
 
     args.api_server_port = _resolve_api_server_port(args)
     args.mini_ft_controller_enable = _resolve_mini_ft_controller_enable(args)

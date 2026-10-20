@@ -51,6 +51,7 @@ from miles.utils.tracking_utils.structured_log import log_structured
 from ...utils.misc import filter_keys
 from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint, save_checkpoint, save_checkpoint_with_lora
+from .chunked_lm_head import chunked_head_kwargs
 from .ci_utils import (
     check_model_hashes,
     check_peak_gpu_memory_after_load,
@@ -368,6 +369,7 @@ def forward_only(
             **(filter_keys(batch, ["witness_ids"]) if args.enable_witness else {}),
             **(batch["multimodal_train_inputs"] if batch["multimodal_train_inputs"] is not None else {}),
             fp32_output=fp32_output,
+            **chunked_head_kwargs(args),
         )
 
         callback_kwargs = dict(
@@ -510,6 +512,8 @@ def run_forward_backward_pass(
             m.stage = "replay_forward"
 
         if return_schedule_plan:
+            if args.chunked_lm_head_size:
+                raise ValueError("Chunked LM head does not support combined pipeline schedules")
             assert not args.enable_mtp_training, "MTP training should not be enabled when using combined 1f1b"
             assert not args.enable_witness, "Witness is not supported with combined 1f1b (build_schedule_plan)"
             output_tensor = model.build_schedule_plan(
@@ -536,6 +540,7 @@ def run_forward_backward_pass(
             if (x := batch["multimodal_train_inputs"]) is not None:
                 forward_kwargs.update(x)
 
+            forward_kwargs.update(chunked_head_kwargs(args))
             output_tensor = model(
                 **forward_kwargs, fp32_output=args.loss_type not in ("policy_loss", "sft_loss", "score_centering")
             )
