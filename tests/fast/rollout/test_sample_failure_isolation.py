@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from miles.rollout.base_types import RolloutSampleError
 from miles.rollout.generate_utils.group import generate_group
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
@@ -98,6 +99,16 @@ async def test_retry_exhaustion_waits_for_siblings_without_resetting_success():
     assert calls == {0: 2, 1: 1}
     assert group[1].reward == 1 and group[1].tokens == [1, 2]
     assert len(credits) == 2
+
+
+async def test_trial_failure_does_not_hide_sibling_programming_error():
+    errors = [RolloutSampleError("agent timeout"), ValueError("invalid configuration")]
+
+    async def generate(index, sample):
+        raise errors[index]
+
+    with pytest.raises(ValueError, match="invalid configuration"):
+        await generate_group([Sample(index=i) for i in range(2)], generate)
 
 
 async def test_cancellation_during_retry_drains_without_another_attempt():

@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from miles.rollout.base_types import RolloutSampleError
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,8 @@ async def generate_group(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
-    for result in results:
-        if isinstance(result, BaseException):
-            raise result
+    errors = [result for result in results if isinstance(result, BaseException)]
+    if errors:
+        # A recoverable trial failure must not hide a sibling's programming error.
+        raise next((error for error in errors if not isinstance(error, RolloutSampleError)), errors[0])
     return results

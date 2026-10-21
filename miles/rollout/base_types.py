@@ -71,6 +71,10 @@ RolloutFnInput = RolloutFnTrainInput | RolloutFnEvalInput
 RolloutFnOutput = RolloutFnTrainOutput | RolloutFnEvalOutput
 
 
+class RolloutSampleError(RuntimeError):
+    """Expected trial failure; fully-async rollout filters the group after retries."""
+
+
 class BaseRolloutFn(abc.ABC):
     def __init__(self, input: RolloutFnConstructorInput) -> None:
         self.constructor_input = input
