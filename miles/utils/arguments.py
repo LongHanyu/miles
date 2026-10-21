@@ -845,7 +845,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Extra attempts for a training trajectory that raises an exception. "
                     "Only the failed trajectory is reset; siblings continue and successful results "
                     "are retained. Default 0 disables retries. Exhaustion propagates the error after "
-                    "siblings finish; explicit cancellation is never retried. Does not apply to eval, "
+                    "siblings finish; fully-async rollout filters groups raising RolloutSampleError "
+                    "using async-unused-samples-handler instead. Explicit cancellation is never retried. "
+                    "Does not apply to eval, "
                     "returned ABORTED samples, group reward failures, or stale-group recycling."
                 ),
             )

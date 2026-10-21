@@ -30,6 +30,7 @@ from miles.rollout.base_types import (
     RolloutFnOutput,
     RolloutFnTrainInput,
     RolloutFnTrainOutput,
+    RolloutSampleError,
 )
 from miles.rollout.fully_async_data_buffer import (
     DataBuffer,
@@ -154,11 +155,16 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 await self._output.put(entry)
 
     def _collect_group_result(self, task: asyncio.Task, prompt_group: list[Sample]) -> DataBufferInput:
+        reason = "cancelled"
         if not task.cancelled():
-            return task.result()
+            try:
+                return task.result()
+            except RolloutSampleError as exc:
+                reason = f"failed after sample retries: {exc}"
 
         logger.warning(
-            "Rollout group was cancelled; marking samples aborted: indices=%s",
+            "Rollout group was %s; marking samples aborted: indices=%s",
+            reason,
             [sample.index for sample in prompt_group],
         )
         return DataBufferInput(
