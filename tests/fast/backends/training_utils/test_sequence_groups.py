@@ -29,6 +29,8 @@ def args(**updates):
                 compute_advantages_and_returns=True,
                 use_rollout_logprobs=True,
                 qkv_format="thd",
+                eps_clip=3e-4,
+                eps_clip_high=4e-4,
             )
             | updates
         )
@@ -257,10 +259,14 @@ def distributed_worker(rank, url):
         cp_rank, dp_rank = rank % 2, rank // 2
         state(GroupInfo(cp_rank, 2, cp_groups[dp_rank]), GroupInfo(dp_rank, 2, dp_groups[cp_rank]))
         full = example()
+        full["advantages"] = [
+            torch.full_like(value, 1.0 if group == 0 else -1.0)
+            for value, group in zip(full["log_probs"], full["sequence_group_ids"], strict=True)
+        ]
         # Both episodes cross DP ranks, and some CP ranks own no active token.
         indices = ([0, 2, 4], [1, 3, 5])[dp_rank]
         data = {key: [values[i] for i in indices] for key, values in full.items()}
-        for key in ("log_probs", "rollout_log_probs"):
+        for key in ("log_probs", "rollout_log_probs", "advantages"):
             data[key] = [
                 slice_log_prob_with_cp(value, total, response, "thd")
                 for value, total, response in zip(
@@ -268,12 +274,18 @@ def distributed_worker(rank, url):
                 )
             ]
         prepare_sequence_groups(args(), data, [3])
+        assert data["gspo_preupdate/episodes"].item() == 2
+        assert data["gspo_preupdate/effective_tokens"].item() == 7
+        assert data["gspo_preupdate/pos_episodes"].item() == 1
+        assert data["gspo_preupdate/neg_episodes"].item() == 1
         for got in data["sequence_group_kl"]:
             torch.testing.assert_close(got, got.new_zeros(()), atol=1e-12, rtol=0)
         # Off-policy nonzero episode statistics as well as the opposite-ratio case.
         changed = deepcopy(data)
         changed["log_probs"] = [value + 0.02 for value in changed["log_probs"]]
         prepare_sequence_groups(args(), changed, [3])
+        assert changed["gspo_preupdate/pos_pg_clip_fraction"].item() == 1
+        assert changed["gspo_preupdate/neg_pg_clip_fraction"].item() == 0
         for group, got in zip(changed["sequence_group_ids"], changed["sequence_group_kl"], strict=True):
             torch.testing.assert_close(got, got.new_tensor(-0.02 if group >= 0 else 0.0), atol=1e-12, rtol=0)
         xs = [value.detach().clone().requires_grad_() for value in data["log_probs"]]
@@ -319,3 +331,181 @@ def distributed_worker(rank, url):
 
 def test_statistics_cross_dp_and_cp(tmp_path):
     mp.spawn(distributed_worker, args=(f"file://{tmp_path / 'rendezvous'}",), nprocs=4, join=True)
+
+
+def fixed_logits_batch(monkeypatch, use_rollout_logprobs):
+    from miles.backends.training_utils.loss.hub import math_utils
+    from miles.backends.training_utils.loss.hub.logit_processors import get_log_probs_and_entropy
+
+    state()
+    # Only the CUDA fused CE primitive is replaced; response slicing, grouped
+    # GSPO, dispatcher, mask/weight reduction and backward remain production code.
+    monkeypatch.setattr(
+        math_utils, "compute_log_probs",
+        lambda logits, tokens, *a, **kw: logits.log_softmax(-1).gather(-1, tokens.unsqueeze(-1)),
+    )
+    config = args(
+        global_batch_size=5, use_rollout_logprobs=use_rollout_logprobs,
+        loss_type="policy_loss", calculate_per_token_loss=False, use_dynamic_global_batch_size=True,
+        skip_actor_forward_only=False, recompute_loss_function=False, allgather_cp=False,
+        true_on_policy_mode=False, rollout_temperature=1.0, log_probs_chunk_size=-1,
+        debug_unified_grad_fused_logprob=False, entropy_coef=0.0, observe_training_entropy=False,
+        use_sampling_support_replay=False, use_opsm=False, dppo_delta=None, eps_clip_c=None,
+        get_mismatch_metrics=False, use_tis=False, custom_pg_loss_reducer_function_path=None,
+        use_kl_loss=True, use_unbiased_kl=False, kl_loss_type="low_var_kl", kl_loss_coef=0.001,
+    )
+    masks = [torch.tensor(row) for row in ([1, 0, 1], [1], [1, 1], [0, 1], [1], [1, 1, 1], [1, 0], [0])]
+    ids = [0, 0, 1, 2, 2, 3, 4, -1]
+    batch = dict(
+        loss_masks=masks, sequence_group_ids=ids,
+        total_lengths=[len(mask) + 2 for mask in masks], response_lengths=[len(mask) for mask in masks],
+        unconcat_tokens=[torch.arange(len(mask) + 2) % 7 for mask in masks], dynamic_global_batch_size=len(masks),
+        rollout_mask_sums=[mask.sum() for mask in masks],
+    )
+    logits = torch.arange(sum(batch["total_lengths"]) * 7, dtype=torch.float32).sin().reshape(1, -1, 7)
+    with torch.no_grad():
+        scores = get_log_probs_and_entropy(
+            logits, args=config, unconcat_tokens=batch["unconcat_tokens"],
+            total_lengths=batch["total_lengths"], response_lengths=batch["response_lengths"],
+        )["log_probs"]
+    batch["log_probs"] = [value.clone().requires_grad_() for value in scores]
+    log_ratios = [0.01, -0.01, 0.01, -0.01, 0.0]
+    batch["rollout_log_probs"] = [
+        (value - (log_ratios[group] if group >= 0 else 0)).requires_grad_()
+        for value, group in zip(scores, ids, strict=True)
+    ]
+    batch["ref_log_probs"] = [(value + 0.15).requires_grad_() for value in scores]
+    signs = [1.0, 1.0, -1.0, -1.0, 0.0]
+    batch["advantages"] = [torch.full_like(value, signs[group] if group >= 0 else 9).requires_grad_()
+                           for value, group in zip(scores, ids, strict=True)]
+    counts = [sum(mask.sum().item() for mask, gid in zip(masks, ids, strict=True) if gid == group)
+              for group in range(5)]
+    batch["sample_weights"] = [
+        mask.sum().item() / counts[group] * len(masks) / 5 if group >= 0 else 0.0
+        for mask, group in zip(masks, ids, strict=True)
+    ]
+    return config, batch, logits
+
+
+@pytest.mark.parametrize("use_rollout_logprobs", [False, True])
+@pytest.mark.parametrize("component", ["policy", "reference", "combined"])
+def test_fixed_logits_old_switch_preserves_policy_kl_gradients_and_masks(monkeypatch, use_rollout_logprobs, component):
+    from miles.backends.training_utils.loss.objective import loss_function
+
+    config, batch, initial = fixed_logits_batch(monkeypatch, use_rollout_logprobs)
+    config.use_kl_loss = component != "policy"
+    if component == "reference":
+        batch["advantages"] = [torch.zeros_like(value).requires_grad_() for value in batch["advantages"]]
+    snapshots = {key: [value.detach().clone() for value in batch[key]]
+                 for key in ("log_probs", "rollout_log_probs", "ref_log_probs", "loss_masks")}
+    weights = list(batch["sample_weights"])
+    prepare_sequence_groups(config, batch, [1])
+    assert all(not value.requires_grad for value in batch["sequence_group_kl"] + batch["sequence_segment_kl"])
+    logits = initial.clone().requires_grad_()
+    actual, _, _ = loss_function(config, batch, 1, logits)
+
+    # Independent unsplit-episode objective from the same full-vocabulary logits.
+    selected, offset = [], 0
+    active_rows = torch.zeros(logits.shape[1], dtype=torch.bool)
+    for tokens, total, response, mask in zip(
+        batch["unconcat_tokens"], batch["total_lengths"], batch["response_lengths"], batch["loss_masks"], strict=True
+    ):
+        start, end = offset + total - response - 1, offset + total - 1
+        selected.append(logits[0, start:end].log_softmax(-1).gather(-1, tokens[-response:, None]).squeeze(-1))
+        active_rows[start:end] = mask.bool()
+        offset += total
+    expected = logits.sum() * 0
+    old_key = "rollout_log_probs" if use_rollout_logprobs else "log_probs"
+    for group in range(5):
+        indices = [i for i, gid in enumerate(batch["sequence_group_ids"]) if gid == group]
+        current = torch.cat([selected[i][batch["loss_masks"][i].bool()] for i in indices])
+        old = torch.cat([batch[old_key][i].detach()[batch["loss_masks"][i].bool()] for i in indices])
+        reference = torch.cat([batch["ref_log_probs"][i].detach()[batch["loss_masks"][i].bool()] for i in indices])
+        advantage = batch["advantages"][indices[0]][0].detach()
+        ratio = (current - old).mean().exp()
+        pg = torch.maximum(-advantage * ratio, -advantage * ratio.clamp(1 - 3e-4, 1 + 4e-4))
+        kl = ((reference - current).exp() - 1 - (reference - current)).mean()
+        expected = expected + (pg + (0.001 * kl if config.use_kl_loss else 0)) / 5
+    torch.testing.assert_close(actual, expected, atol=2e-7, rtol=2e-5)
+    frozen = [value for key in ("log_probs", "rollout_log_probs", "ref_log_probs", "advantages") for value in batch[key]]
+    # Compiled KL backward may donate buffers. Request every production-graph
+    # gradient in one traversal; the reference objective has its own graph.
+    got, *frozen_grads = torch.autograd.grad(actual, [logits, *frozen], allow_unused=True)
+    want = torch.autograd.grad(expected, logits)[0]
+    torch.testing.assert_close(got, want, atol=2e-7, rtol=2e-5)
+    assert torch.count_nonzero(got[0, ~active_rows]) == 0
+    assert torch.count_nonzero(got) > 0
+    assert all(value is None for value in frozen_grads)
+    assert batch["sample_weights"] == weights
+    for key, values in snapshots.items():
+        for got_value, original in zip(batch[key], values, strict=True):
+            torch.testing.assert_close(got_value, original)
+    if not use_rollout_logprobs:
+        assert all(value.item() == 0 for value in batch["sequence_group_kl"])
+        # A numerically unit ratio must still have a nonzero policy gradient.
+        assert component == "reference" or torch.count_nonzero(got) > 0
+
+
+@pytest.mark.parametrize("use_rollout_logprobs", [False, True])
+def test_preupdate_episode_diagnostics_use_existing_scalar_logger(monkeypatch, use_rollout_logprobs):
+    from miles.backends.training_utils.metrics import log_utils
+
+    config, batch, _ = fixed_logits_batch(monkeypatch, use_rollout_logprobs)
+    config.ci_test = config.log_multi_turn = config.log_passrate = config.log_correct_samples = False
+    prepare_sequence_groups(config, batch, [1])
+    metrics = {key: value for key, value in batch.items() if key.startswith("gspo_preupdate/")}
+    assert len(metrics) == 22
+    assert all(value.ndim == 0 and not value.requires_grad and torch.isfinite(value) for value in metrics.values())
+    assert metrics["gspo_preupdate/episodes"] == 5
+    assert metrics["gspo_preupdate/effective_tokens"] == 11
+    assert metrics["gspo_preupdate/zero_adv_episodes"] == 1
+    assert metrics["gspo_preupdate/mixed_adv_episodes"] == 0
+    for sign in ("pos", "neg"):
+        assert metrics[f"gspo_preupdate/{sign}_episodes"] == 2
+        assert metrics[f"gspo_preupdate/{sign}_pg_clip_fraction"] == (0.5 if use_rollout_logprobs else 0)
+        ratios = torch.tensor([-0.01, 0.01]).exp() if use_rollout_logprobs else torch.ones(2)
+        for q, name in ((0.05, "p05"), (0.5, "p50"), (0.95, "p95")):
+            torch.testing.assert_close(metrics[f"gspo_preupdate/{sign}_ratio_{name}"], torch.quantile(ratios, q))
+    captured = {}
+    monkeypatch.setattr(log_utils, "gather_log_data", lambda _name, _args, _id, metrics: captured.update(metrics))
+    log_rollout = {key: value for key, value in batch.items() if key != "unconcat_tokens"}
+    log_utils.log_rollout_data(0, config, log_rollout)
+    gathered = log_utils.reduce_gathered_log_dict([captured, captured], dp_size=2)
+    assert gathered["gspo_preupdate/episodes"] == 5
+    assert gathered["gspo_preupdate/effective_tokens"] == 11
+    assert "sequence_group_kl" not in captured
+
+
+def test_preupdate_diagnostics_bound_extremes_and_identify_empty_or_mixed_signs(monkeypatch):
+    config, batch, _ = fixed_logits_batch(monkeypatch, True)
+    batch["rollout_log_probs"] = [value.detach() - 30 for value in batch["log_probs"]]
+    batch["advantages"] = [torch.zeros_like(value) for value in batch["advantages"]]
+    prepare_sequence_groups(config, batch, [1])
+    assert batch["gspo_preupdate/ratio_saturated_episodes"] == 5
+    assert batch["gspo_preupdate/zero_adv_episodes"] == 5
+    for sign in ("pos", "neg"):
+        assert batch[f"gspo_preupdate/{sign}_episodes"] == 0
+        assert batch[f"gspo_preupdate/{sign}_ratio_mean"] == 0
+        assert batch[f"gspo_preupdate/{sign}_pg_clip_fraction"] == 0
+    batch["advantages"][0][0], batch["advantages"][0][2] = 1, -1
+    prepare_sequence_groups(config, batch, [1])
+    assert batch["gspo_preupdate/mixed_adv_episodes"] == 1
+    assert batch["gspo_preupdate/zero_adv_episodes"] == 4
+
+
+@pytest.mark.parametrize("dtype", [torch.int64, torch.float64])
+def test_preupdate_scalar_token_count_survives_logging_above_float32_integer_limit(monkeypatch, dtype):
+    from miles.backends.training_utils.metrics import log_utils
+
+    state()
+    data = example()
+    data["gspo_preupdate/effective_tokens"] = torch.tensor(16_777_217, dtype=dtype)
+    options = args(ci_test=False, log_multi_turn=False, log_passrate=False, log_correct_samples=False)
+    captured = {}
+    monkeypatch.setattr(log_utils, "gather_log_data", lambda _name, _args, _id, metrics: captured.update(metrics))
+
+    log_utils.log_rollout_data(0, options, data)
+
+    assert captured["gspo_preupdate/effective_tokens"] == (16_777_217, 1)
+    reduced = log_utils.reduce_gathered_log_dict([captured, captured], dp_size=2)
+    assert reduced["gspo_preupdate/effective_tokens"] == 16_777_217

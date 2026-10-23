@@ -294,7 +294,8 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                         continue
                     log_dict[key] = (sum(flat), len(flat))
             elif isinstance(val, torch.Tensor):
-                log_dict[key] = (val.float().mean().item(), 1)
+                # Preserve exact scalar counters above float32's integer range.
+                log_dict[key] = (val.item() if val.ndim == 0 else val.float().mean().item(), 1)
             else:
                 raise ValueError(f"Unsupported type: {type(val)} for key: {key}")
 
