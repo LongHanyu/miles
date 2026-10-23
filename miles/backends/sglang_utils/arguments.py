@@ -46,7 +46,7 @@ _SKIPPED_SERVER_ARGS = [
     "enable_memory_saver",
     # distributed
     # tp_size stays exposed: scripts pass --sglang-tp-size, but the value is
-    # overridden from --rollout-num-gpus-per-engine in validate_args below.
+    # derived from the engine GPU budget and DP mode in validate_args below.
     "port",
     "nnodes",
     "node_rank",
@@ -182,8 +182,27 @@ def add_sglang_arguments(parser):
     return parser
 
 
+def compute_tp_size(*, num_gpus: int, dp_size: int, pp_size: int, enable_dp_attention: bool) -> int:
+    """Ordinary DP owns complete TP replicas; DP attention shares the TP ranks."""
+    if dp_size < 1:
+        raise ValueError("SGLang dp_size must be positive")
+    if dp_size == 1 or enable_dp_attention:
+        return num_gpus
+    if pp_size != 1:
+        raise ValueError("Miles ordinary SGLang DP currently requires pp_size=1")
+    if num_gpus % dp_size:
+        raise ValueError(f"Engine GPU budget {num_gpus} must be divisible by ordinary DP size {dp_size}")
+    return num_gpus // dp_size
+
+
 def validate_args(args):
-    args.sglang_tp_size = args.rollout_num_gpus_per_engine
+    # The placement budget remains authoritative over the legacy --sglang-tp-size flag.
+    args.sglang_tp_size = compute_tp_size(
+        num_gpus=args.rollout_num_gpus_per_engine,
+        dp_size=args.sglang_dp_size,
+        pp_size=args.sglang_pp_size,
+        enable_dp_attention=args.sglang_enable_dp_attention,
+    )
 
     if args.true_on_policy_mode:
         args.sglang_enable_deterministic_inference = True
@@ -191,9 +210,6 @@ def validate_args(args):
     if getattr(args, "recompute_logprobs_via_prefill", False):
         args.sglang_enable_prefill_only_deterministic_inference = True
         args.sglang_enable_deterministic_inference = True
-
-    if args.sglang_dp_size > 1:
-        assert args.sglang_enable_dp_attention
 
     if args.sglang_enable_dp_attention:
         args.router_dp_aware = True

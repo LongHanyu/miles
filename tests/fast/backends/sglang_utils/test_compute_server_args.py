@@ -84,6 +84,45 @@ class TestRandomSeed:
         assert server_args["random_seed"] == 99
 
 
+class TestOrdinaryDataParallel:
+    @pytest.mark.parametrize("base_gpu_id", [0, 4])
+    def test_dp4_uses_four_slots_but_one_tensor_parallel_rank(self, base_gpu_id):
+        result = compute(
+            make_args(rollout_num_gpus_per_engine=4, sglang_dp_size=4, sglang_disable_cuda_graph=False),
+            base_gpu_id=base_gpu_id,
+        )
+        assert (result["tp_size"], result["dp_size"], result["nnodes"]) == (1, 4, 1)
+        assert result["base_gpu_id"] == base_gpu_id
+        assert not result.get("enable_dp_attention", False)
+        assert not result["disable_cuda_graph"]
+        assert result["enable_draft_weights_cpu_backup"]
+        assert result["nccl_port"] is None
+        assert result["dist_init_addr"] is None
+
+    def test_group_dp_override_is_used_before_deriving_tp(self):
+        result = compute(make_args(), num_gpus_per_engine=4, sglang_overrides={"dp_size": 4, "tp_size": 1})
+        assert (result["tp_size"], result["dp_size"]) == (1, 4)
+
+    def test_dp_attention_keeps_shared_tp_ranks(self):
+        result = compute(make_args(rollout_num_gpus_per_engine=4, sglang_dp_size=4, sglang_enable_dp_attention=True))
+        assert (result["tp_size"], result["dp_size"]) == (4, 4)
+        assert result["nccl_port"] == 5000
+        assert result["dist_init_addr"] == "127.0.0.1:1234"
+
+    @pytest.mark.parametrize(
+        "gpu_count,overrides,message",
+        [
+            (4, {"dp_size": 3}, "divisible"),
+            (4, {"dp_size": 4, "tp_size": 4}, "GPU budget"),
+            (4, {"dp_size": 4, "pp_size": 2}, "pp_size=1"),
+            (16, {"dp_size": 4}, "single-node"),
+        ],
+    )
+    def test_unsupported_layout_fails_before_launch(self, gpu_count, overrides, message):
+        with pytest.raises(ValueError, match=message):
+            compute(make_args(), num_gpus_per_engine=gpu_count, sglang_overrides=overrides)
+
+
 class TestBaseGpuId:
     def test_the_given_base_gpu_id_is_used_verbatim_under_a_visibility_mask(self, monkeypatch):
         """The id already names the engine's own device space, so remapping it here moves the engine."""

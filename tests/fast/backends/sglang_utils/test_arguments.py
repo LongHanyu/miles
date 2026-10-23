@@ -9,7 +9,7 @@ pytest.importorskip("sglang")
 
 from sglang.srt.server_args import ServerArgs
 
-from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_eval_sglang_overrides
+from miles.backends.sglang_utils.arguments import add_sglang_arguments, collect_eval_sglang_overrides, validate_args
 from miles.utils.workers.argv_utils import _record_field_names
 
 
@@ -20,6 +20,20 @@ def _sglang_flags() -> set[str]:
 
 def _parse_sglang_args(argv: list[str]) -> argparse.Namespace:
     return add_sglang_arguments(argparse.ArgumentParser()).parse_args(argv)
+
+
+def test_ordinary_dp4_derives_tp1_without_enabling_dp_attention():
+    args = _parse_sglang_args(["--sglang-dp-size", "4", "--sglang-tp-size", "1"])
+    args.rollout_num_gpus_per_engine = 4
+    args.true_on_policy_mode = False
+    args.use_session_server = False
+    args.router_dp_aware = False
+
+    validate_args(args)
+
+    assert args.sglang_tp_size == 1
+    assert not args.sglang_enable_dp_attention
+    assert not args.router_dp_aware
 
 
 class TestSglangModelRoutersDefault:

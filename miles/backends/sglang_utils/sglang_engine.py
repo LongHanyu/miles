@@ -6,6 +6,7 @@ import shlex
 
 from sglang.srt.server_args import ServerArgs
 
+from miles.backends.sglang_utils.arguments import compute_tp_size
 from miles.backends.sglang_utils.server_args_utils import server_args_to_argv
 from miles.utils.lora.utils import (
     LORA_ADAPTER_NAME,
@@ -183,6 +184,25 @@ def _compute_server_args(
     # Last, so a per-group override wins over every args-derived default above.
     if sglang_overrides:
         kwargs.update(sglang_overrides)
+
+    enable_dp_attention = kwargs.get("enable_dp_attention", getattr(args, "sglang_enable_dp_attention", False))
+    if kwargs["dp_size"] > 1 and not enable_dp_attention:
+        if nnodes != 1:
+            raise ValueError("Miles ordinary SGLang DP currently requires a single-node engine")
+        tp_size = compute_tp_size(
+            num_gpus=_gpus_per_engine,
+            dp_size=kwargs["dp_size"],
+            pp_size=kwargs["pp_size"],
+            enable_dp_attention=False,
+        )
+        if sglang_overrides and "tp_size" in sglang_overrides and kwargs["tp_size"] != tp_size:
+            raise ValueError("Ordinary DP tp_size override does not match the allocated engine GPU budget")
+        # Derive TP after group overrides: ordinary DP replicas each consume TP GPUs.
+        kwargs["tp_size"] = tp_size
+        # SGLang allocates a separate rendezvous per ordinary DP replica. A fixed
+        # server-wide port/address would make those independent TP groups collide.
+        kwargs["nccl_port"] = None
+        kwargs["dist_init_addr"] = None
 
     unused_keys = set(kwargs.keys())
     for name in _record_field_names(ServerArgs):

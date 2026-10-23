@@ -667,6 +667,14 @@ def _make_router_args(tmp_path, *, server_groups: list[dict] | None = None, **ov
 
 
 class TestComputeEnginePools:
+    def test_ordinary_dp4_places_two_four_gpu_servers_per_node(self):
+        args = make_args(rollout_num_gpus=8, rollout_num_gpus_per_engine=4, sglang_dp_size=4)
+        (spec,) = specs_inference_engine(args)
+        assert spec.scheduling.num_cells == 2
+        assert spec.scheduling.num_workers_per_cell == 1
+        assert spec.scheduling.num_gpu_slots_per_worker == 4
+        assert spec.scheduling.num_gpus_per_node == 8
+
     def test_only_engine_specs_are_named(self, tmp_path):
         """These names are what the controller watches, so a router in the list would be reconciled as an engine."""
         config_path = tmp_path / "sglang.yaml"

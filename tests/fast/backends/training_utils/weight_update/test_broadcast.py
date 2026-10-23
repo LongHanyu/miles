@@ -72,6 +72,27 @@ class _RecordingHandle:
 
 
 class TestConnectRolloutEnginesFromDistributed:
+    def test_two_dp4_servers_reserve_all_eight_receiver_ranks(self):
+        engines = [MagicMock(), MagicMock()]
+        calls = []
+
+        async def record(*args, **kwargs):
+            calls.append(args)
+            return {"success": True}
+
+        for engine in engines:
+            engine.init_weights_update_group = record
+        with (
+            patch(f"{_BROADCAST_MODULE}.ray") as ray_mock,
+            patch(f"{_BROADCAST_MODULE}.init_process_group") as init,
+        ):
+            ray_mock._private.services.get_node_ip_address.return_value = "10.0.0.1"
+            connect_rollout_engines_from_distributed(
+                Namespace(rollout_num_gpus_per_engine=4), "dp4", engines, engine_gpu_counts=[4, 4]
+            )
+        assert sorted((call[2], call[3]) for call in calls) == [(1, 9), (5, 9)]
+        assert init.call_args.kwargs["world_size"] == 9
+
     def test_group_init_starts_all_engines_before_local_join_with_heterogeneous_offsets(self) -> None:
         """Every engine is asked to join, at its own rank offset, before rank zero blocks on the handshake."""
         started = threading.Semaphore(0)
